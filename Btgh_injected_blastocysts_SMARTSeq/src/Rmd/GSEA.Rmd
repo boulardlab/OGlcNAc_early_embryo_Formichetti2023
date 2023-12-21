@@ -42,7 +42,7 @@ load("Rdata/gene_map_dt.Rdata")
 
 ```
 
-## Gene Set Enrichment Test
+# Gene Set Enrichment Test
 
 ```{r preparing go data for similarity analysis}
 
