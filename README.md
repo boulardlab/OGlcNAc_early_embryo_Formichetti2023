@@ -24,7 +24,7 @@ For each of the 4 embryonic stages, the general workflow is the same:
 
 <n>
 
-2. different kinds of custom downstream analyses using the output of each pipeline and performed with R, all included in Rmd files with self-explanatory names, found in **src/Rmd** and **whose output is [here](LINK TO PAGES)**. Order of Rmd is specified in the main README of each subdirectory.
+2. different kinds of custom downstream analyses using the output of each pipeline and performed with R, all included in Rmd files with self-explanatory names, found in **src/Rmd** and **whose output is [here](https://boulardlab.github.io/OGlcNAc_early_embryo_Formichetti2023/)**. Order of Rmd is specified in the main README of each subdirectory.
 
 For **2-cell embryos**, the repository also contains the analysis of Smart-Seq data from [GSE111864](https://0-www-ncbi-nlm-nih-gov.brum.beds.ac.uk/geo/query/acc.cgi?acc=GSE111864) (the subset of samples analyzed is in sequencing/Conine/SRR_Acc_List_cauda_2C_GSE111864.txt):
 
@@ -42,7 +42,7 @@ For **2-cell embryos**, the repository also contains the analysis of Smart-Seq d
 
 <n>
 
-2. different kinds of custom downstream analyses using the output of each pipeline and performed with R, all included in Rmd files with self-explanatory names, found in **src/Rmd** and **whose output is [here](LINK TO PAGES)**. Order of Rmd is specified in the main README of the subdirectory.
+2. different kinds of custom downstream analyses using the output of each pipeline and performed with R, all included in Rmd files with self-explanatory names, found in **src/Rmd** and **whose output is [here](https://boulardlab.github.io/OGlcNAc_early_embryo_Formichetti2023/)**. Order of Rmd is specified in the main README of the subdirectory.
 
 ### Analysis of reads coverage / alternative splicing:
 
