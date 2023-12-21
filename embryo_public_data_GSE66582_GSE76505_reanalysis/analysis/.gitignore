@@ -4,6 +4,6 @@
 !sashimi/
 sashimi/*
 sashimi/pdf/*
-!sashimi/pdf/*.pdf
+!sashimi/pdf/Og*
 !sashimi/bam_list.tsv
 
