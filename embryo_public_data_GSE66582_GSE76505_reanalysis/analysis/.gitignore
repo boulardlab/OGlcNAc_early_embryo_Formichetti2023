@@ -2,4 +2,7 @@
 !README.md
 !.gitignore
 !sashimi/
+sashimi/*
+!sashimi/pdf/
+!sashimi/bam_list.tsv
 
