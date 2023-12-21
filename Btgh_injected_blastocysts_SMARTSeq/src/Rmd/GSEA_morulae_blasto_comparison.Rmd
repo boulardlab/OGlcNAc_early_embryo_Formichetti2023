@@ -1,0 +1,196 @@
+---
+title: "Comparison of morulae and blastocysts GSEA results"
+date: '2022-09-16'
+author: 
+- name: Sara Formichetti
+  affiliation: EMBL Rome
+  email: sara.formichetti@embl.it
+output:
+  prettydoc::html_pretty:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    fig_caption: yes
+---
+
+```{r Setting general options, include=FALSE}
+
+knitr::opts_chunk$set(autodep = TRUE, cache = TRUE, echo = FALSE, warning = FALSE, message = FALSE, results = 'hide', fig.width=12, fig.height=8)
+
+```
+
+```{r loading needed packages}
+
+library("DESeq2")
+library(ggplot2)
+library("ggrepel")
+library("vsn")
+library(data.table)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(enrichplot)
+library(DOSE)
+
+```
+
+```{r loading necessary Rdata}
+
+load("Rdata/all_gsea_activeVsCtrl.Rdata")
+all_gsea_activeVsCtrl_b <- all_gsea_activeVsCtrl
+load("Rdata/all_gsea_activeVsDead.Rdata")
+all_gsea_activeVsDead_b <- all_gsea_activeVsDead
+load("Rdata/all_gsea_deadVsCtrl.Rdata")
+all_gsea_deadVsCtrl_b <- all_gsea_deadVsCtrl
+load("../../../Btgh_injected_morulae_SMARTSeq/src/Rmd/Rdata/all_gsea_activeVsCtrl.Rdata")
+load("../../../Btgh_injected_morulae_SMARTSeq/src/Rmd/Rdata/all_gsea_activeVsDead.Rdata")
+load("../../../Btgh_injected_morulae_SMARTSeq/src/Rmd/Rdata/all_gsea_deadVsCtrl.Rdata")
+
+```
+
+Protocol:
+
+1. merging GSEA result for each comparison at each stage
+2. choosing first 20 GOs for each stage based on abs(Normalized Enrichment Score)
+3. if terms appearing in the plot for the deadVsCtrl comparison are unique to this comparison, making a second plot without the deadVsCtrl comparison (specified in plot title)
+
+<n>
+
+IMPORTANT: Ribosome related terms are removed from all plots and then plotted all together at the end.
+
+# Biological Process GO terms (FIGURE for upregulated terms)
+
+```{r GO Enrichment Test plot BP, include = TRUE, fig.height=8, fig.width=12}
+
+# combining gsea results
+all_gsea_BP_df_m <- as.data.table(rbind(fortify(all_gsea_activeVsCtrl[[1]], showCategory = nrow(all_gsea_activeVsCtrl[[1]]@result)), fortify(all_gsea_activeVsDead[[1]], showCategory = nrow(all_gsea_activeVsDead[[1]]@result)), fortify(all_gsea_deadVsCtrl[[1]], showCategory = nrow(all_gsea_deadVsCtrl[[1]]@result))))
+all_gsea_BP_df_m$comparison <- rep(c("activeVsCtrl", "activeVsDead", "deadVsCtrl"), c(nrow(all_gsea_activeVsCtrl[[1]]@result), nrow(all_gsea_activeVsDead[[1]]@result), nrow(all_gsea_deadVsCtrl[[1]]@result)))
+all_gsea_BP_df_b <- as.data.table(rbind(fortify(all_gsea_activeVsCtrl_b[[1]], showCategory = nrow(all_gsea_activeVsCtrl_b[[1]]@result)), fortify(all_gsea_activeVsDead_b[[1]], showCategory = nrow(all_gsea_activeVsDead_b[[1]]@result)), fortify(all_gsea_deadVsCtrl_b[[1]], showCategory = nrow(all_gsea_deadVsCtrl_b[[1]]@result))))
+all_gsea_BP_df_b$comparison <- rep(c("activeVsCtrl", "activeVsDead", "deadVsCtrl"), c(nrow(all_gsea_activeVsCtrl_b[[1]]@result), nrow(all_gsea_activeVsDead_b[[1]]@result), nrow(all_gsea_deadVsCtrl_b[[1]]@result)))
+all_gsea_BP_df_m_b <- rbind(all_gsea_BP_df_m, all_gsea_BP_df_b)
+all_gsea_BP_df_m_b$stage <- rep(c("morulae", "blastocysts"), c(nrow(all_gsea_BP_df_m), nrow(all_gsea_BP_df_b)))
+all_gsea_BP_df_m_b$stage <- factor(all_gsea_BP_df_m_b$stage, levels = c("morulae", "blastocysts"))
+# computing absolute NES
+all_gsea_BP_df_m_b$abs_NES <- abs(all_gsea_BP_df_m_b$NES)
+# ordering based on abs NES
+setorder(all_gsea_BP_df_m_b, stage, -abs_NES, comparison)
+# taking first GOs for each stage based on NES
+best_NES_terms <- all_gsea_BP_df_m_b[, .SD[1:20], by=c("stage"), .SDcols = "ID"]$ID
+red_all_gsea_BP_df_m_b <- all_gsea_BP_df_m_b[ID %in% best_NES_terms]
+
+library(DOSE)
+library(tidytext)
+
+ggplot(red_all_gsea_BP_df_m_b[!grepl("ribosom|polysome|rRNA|translation", red_all_gsea_BP_df_m_b$Description)], aes(x = GeneRatio, y = reorder_within(Description, GeneRatio, .sign), color = p.adjust)) +
+      scale_color_continuous(low="red", high="blue", name = "p.adjust", guide = guide_colorbar(reverse=TRUE)) +
+      geom_point(aes(size=setSize)) +
+      scale_y_reordered() +
+      scale_size(range=c(0.5, 5)) +
+      ylab(NULL) +
+      theme_dose(10) +
+      facet_grid(.sign ~ stage * comparison, scales = "free_y") +
+      theme(title = element_text(size = 14),
+            legend.text = element_text(size = 10), legend.title = element_text(size = 8))
+
+# now I remove the deadVsCtrl
+
+all_gsea_BP_df_m <- as.data.table(rbind(fortify(all_gsea_activeVsCtrl[[1]], showCategory = nrow(all_gsea_activeVsCtrl[[1]]@result)), fortify(all_gsea_activeVsDead[[1]], showCategory = nrow(all_gsea_activeVsDead[[1]]@result))))
+all_gsea_BP_df_m$comparison <- rep(c("activeVsCtrl", "activeVsDead"), c(nrow(all_gsea_activeVsCtrl[[1]]@result), nrow(all_gsea_activeVsDead[[1]]@result)))
+all_gsea_BP_df_b <- as.data.table(rbind(fortify(all_gsea_activeVsCtrl_b[[1]], showCategory = nrow(all_gsea_activeVsCtrl_b[[1]]@result)), fortify(all_gsea_activeVsDead_b[[1]], showCategory = nrow(all_gsea_activeVsDead_b[[1]]@result))))
+all_gsea_BP_df_b$comparison <- rep(c("activeVsCtrl", "activeVsDead"), c(nrow(all_gsea_activeVsCtrl_b[[1]]@result), nrow(all_gsea_activeVsDead_b[[1]]@result)))
+all_gsea_BP_df_m_b <- rbind(all_gsea_BP_df_m, all_gsea_BP_df_b)
+all_gsea_BP_df_m_b$stage <- rep(c("morulae", "blastocysts"), c(nrow(all_gsea_BP_df_m), nrow(all_gsea_BP_df_b)))
+all_gsea_BP_df_m_b$stage <- factor(all_gsea_BP_df_m_b$stage, levels = c("morulae", "blastocysts"))
+all_gsea_BP_df_m_b$abs_NES <- abs(all_gsea_BP_df_m_b$NES) 
+setorder(all_gsea_BP_df_m_b, stage, -abs_NES, comparison)
+best_NES_terms <- all_gsea_BP_df_m_b[, .SD[1:20], by=c("stage"), .SDcols = "ID"]$ID
+red_all_gsea_BP_df_m_b <- all_gsea_BP_df_m_b[ID %in% best_NES_terms]
+
+ggplot(red_all_gsea_BP_df_m_b[!grepl("ribosom|polysome|rRNA|translation|process", red_all_gsea_BP_df_m_b$Description)], aes(x = GeneRatio, y = reorder_within(Description, GeneRatio, .sign), color = p.adjust)) +
+      scale_color_continuous(low="red", high="blue", name = "p.adjust", guide = guide_colorbar(reverse=TRUE)) +
+      geom_point(aes(size=setSize)) +
+      scale_y_reordered() +
+      scale_size(range=c(0.5, 5)) +
+      ylab(NULL) +
+      ggtitle("Merging only activeVsCtrl and activeVsDead") +
+      theme_dose(10) +
+      facet_grid(.sign ~ stage * comparison, scales = "free_y") +
+      theme(title = element_text(size = 14),
+            legend.text = element_text(size = 10), legend.title = element_text(size = 8))
+
+```
+
+# Cellular Component GO terms (FIGURE for downregulated terms)
+
+```{r GO Enrichment Test plot CC, include = TRUE, fig.height=8, fig.width=12}
+
+all_gsea_CC_df_m <- as.data.table(rbind(fortify(all_gsea_activeVsCtrl[[3]], showCategory = nrow(all_gsea_activeVsCtrl[[3]]@result)), fortify(all_gsea_activeVsDead[[3]], showCategory = nrow(all_gsea_activeVsDead[[3]]@result)), fortify(all_gsea_deadVsCtrl[[3]], showCategory = nrow(all_gsea_deadVsCtrl[[3]]@result))))
+all_gsea_CC_df_m$comparison <- rep(c("activeVsCtrl", "activeVsDead", "deadVsCtrl"), c(nrow(all_gsea_activeVsCtrl[[3]]@result), nrow(all_gsea_activeVsDead[[3]]@result), nrow(all_gsea_deadVsCtrl[[3]]@result)))
+all_gsea_CC_df_b <- as.data.table(rbind(fortify(all_gsea_activeVsCtrl_b[[3]], showCategory = nrow(all_gsea_activeVsCtrl_b[[3]]@result)), fortify(all_gsea_activeVsDead_b[[3]], showCategory = nrow(all_gsea_activeVsDead_b[[3]]@result)), fortify(all_gsea_deadVsCtrl_b[[3]], showCategory = nrow(all_gsea_deadVsCtrl_b[[3]]@result))))
+all_gsea_CC_df_b$comparison <- rep(c("activeVsCtrl", "activeVsDead", "deadVsCtrl"), c(nrow(all_gsea_activeVsCtrl_b[[3]]@result), nrow(all_gsea_activeVsDead_b[[3]]@result), nrow(all_gsea_deadVsCtrl_b[[3]]@result)))
+all_gsea_CC_df_m_b <- rbind(all_gsea_CC_df_m, all_gsea_CC_df_b)
+all_gsea_CC_df_m_b$stage <- rep(c("morulae", "blastocysts"), c(nrow(all_gsea_CC_df_m), nrow(all_gsea_CC_df_b)))
+all_gsea_CC_df_m_b$stage <- factor(all_gsea_CC_df_m_b$stage, levels = c("morulae", "blastocysts"))
+all_gsea_CC_df_m_b$abs_NES <- abs(all_gsea_CC_df_m_b$NES) 
+setorder(all_gsea_CC_df_m_b, stage, -abs_NES, comparison)
+best_NES_terms <- all_gsea_CC_df_m_b[, .SD[1:20], by=c("stage"), .SDcols = "ID"]$ID
+red_all_gsea_CC_df_m_b <- all_gsea_CC_df_m_b[ID %in% best_NES_terms]
+
+ggplot(red_all_gsea_CC_df_m_b[!grepl("ribosom|polysome|rRNA", red_all_gsea_CC_df_m_b$Description)], aes(x = GeneRatio, y = reorder_within(Description, GeneRatio, .sign), color = p.adjust)) +
+      scale_color_continuous(low="red", high="blue", name = "p.adjust", guide = guide_colorbar(reverse=TRUE)) +
+      geom_point(aes(size=setSize)) +
+      scale_y_reordered() +
+      scale_size(range=c(0.5, 5)) +
+      ylab(NULL) +
+      theme_dose(10) +
+      facet_grid(.sign ~ stage * comparison, scales = "free_y") +
+      theme(title = element_text(size = 14),
+            legend.text = element_text(size = 10), legend.title = element_text(size = 8))
+
+# now I remove the deadVsCtrl
+
+all_gsea_CC_df_m <- as.data.table(rbind(fortify(all_gsea_activeVsCtrl[[3]], showCategory = nrow(all_gsea_activeVsCtrl[[3]]@result)), fortify(all_gsea_activeVsDead[[3]], showCategory = nrow(all_gsea_activeVsDead[[3]]@result))))
+all_gsea_CC_df_m$comparison <- rep(c("activeVsCtrl", "activeVsDead"), c(nrow(all_gsea_activeVsCtrl[[3]]@result), nrow(all_gsea_activeVsDead[[3]]@result)))
+all_gsea_CC_df_b <- as.data.table(rbind(fortify(all_gsea_activeVsCtrl_b[[3]], showCategory = nrow(all_gsea_activeVsCtrl_b[[3]]@result)), fortify(all_gsea_activeVsDead_b[[3]], showCategory = nrow(all_gsea_activeVsDead_b[[3]]@result))))
+all_gsea_CC_df_b$comparison <- rep(c("activeVsCtrl", "activeVsDead"), c(nrow(all_gsea_activeVsCtrl_b[[3]]@result), nrow(all_gsea_activeVsDead_b[[3]]@result)))
+all_gsea_CC_df_m_b <- rbind(all_gsea_CC_df_m, all_gsea_CC_df_b)
+all_gsea_CC_df_m_b$stage <- rep(c("morulae", "blastocysts"), c(nrow(all_gsea_CC_df_m), nrow(all_gsea_CC_df_b)))
+all_gsea_CC_df_m_b$stage <- factor(all_gsea_CC_df_m_b$stage, levels = c("morulae", "blastocysts"))
+all_gsea_CC_df_m_b$abs_NES <- abs(all_gsea_CC_df_m_b$NES) 
+setorder(all_gsea_CC_df_m_b, stage, -abs_NES, comparison)
+best_NES_terms <- all_gsea_CC_df_m_b[, .SD[1:20], by=c("stage"), .SDcols = "ID"]$ID
+red_all_gsea_CC_df_m_b <- all_gsea_CC_df_m_b[ID %in% best_NES_terms]
+
+ggplot(red_all_gsea_CC_df_m_b[!grepl("ribosom|polysome|rRNA", red_all_gsea_CC_df_m_b$Description)], aes(x = GeneRatio, y = reorder_within(Description, GeneRatio, .sign), color = p.adjust)) +
+      scale_color_continuous(low="red", high="blue", name = "p.adjust", guide = guide_colorbar(reverse=TRUE)) +
+      geom_point(aes(size=setSize)) +
+      scale_y_reordered() +
+      scale_size(range=c(0.5, 5)) +
+      ylab(NULL) +
+      ggtitle("Merging only activeVsCtrl and activeVsDead") +
+      theme_dose(10) +
+      facet_grid(.sign ~ stage * comparison, scales = "free_y") +
+      theme(title = element_text(size = 14),
+            legend.text = element_text(size = 10), legend.title = element_text(size = 8))
+
+```
+
+# Ribosome-related GO terms
+
+```{r ribosomal GOs (FIGURE), include = TRUE}
+
+ribo_NES_dt <- rbind(all_gsea_BP_df_m_b[grepl("ribosom|polysome|rRNA|translation", all_gsea_BP_df_m_b$Description)], all_gsea_CC_df_m_b[grepl("ribosom|polysome|rRNA|translation", all_gsea_CC_df_m_b$Description)])
+ribo_NES_dt <-  ribo_NES_dt[, lapply(.SD, mean), by = c("stage", "comparison"), .SDcols = "NES"]
+ggplot(ribo_NES_dt, aes(x = stage, y = NES, fill = comparison)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+
+```
+
+```{r sessioninfo, echo = TRUE, results = 'markup'}
+
+sessionInfo()
+
+```

@@ -1,0 +1,376 @@
+---
+title: "SMART-Seq2 mRNA-Seq of morulae injected and nonInjected w active/dead-Btgh - embryo filtering and clustering"
+date: "June 5th, 2022"
+author: 
+- name: Sara Formichetti
+  affiliation: EMBL Rome
+  email: sara.formichetti@embl.it
+output:
+  prettydoc::html_pretty:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    fig_caption: yes
+---
+
+```{r Setting general options, include=FALSE}
+
+knitr::opts_chunk$set(autodep = TRUE, cache = TRUE, echo = FALSE, warning = FALSE, message = FALSE, results = 'hide', fig.width=12, fig.height=8)
+
+```
+
+```{r loading needed packages}
+
+library(ggplot2)
+library(reshape2)
+library(data.table)
+library("DESeq2")
+library(ggpubr)
+library(gridExtra)
+library(pheatmap)
+library(ggrepel)
+library(vsn)
+library(RUVSeq)
+library(dplyr)
+
+```
+
+```{r creating tx2gene and geneID2name df}
+
+# Creating the transcriptID2geneID df; the transcriptID2geneID tsv file has been created with custom shell script tx2gene_from_encode_gtf.sh in src/sh folder
+tx2gene <- fread("../../data/annotations/gencode.vM25.annotation.tx2gene.tsv", col.names = c("tx_id", "gene_id"))
+# removing version
+tx2gene <- tx2gene[,  lapply(.SD, gsub, pattern = "\\..*", replacement = ""), .SDcols = names(tx2gene)]
+# Adding to the tx2gene DataFrame the transcript-gene pairs corresponding to OsTIR and AID
+tg_tx2gene <- DataFrame(tx_id = paste0(c("NLS_EGFP_activeBtgh_NLS", "NLS_EGFP_deadBtgh_NLS"), "_transcript"), gene_id = paste0(c("NLS_EGFP_activeBtgh_NLS", "NLS_EGFP_deadBtgh_NLS"), "_gene"))
+tx2gene_w_ex <- rbind(tx2gene, tg_tx2gene)
+
+# Creating the geneID2geneName df; the geneID2geneName tsv file has been created with custom shell script geneID2name_from_encode_gtf.sh in src/sh folder
+geneID2name <- fread("../../data/annotations/gencode.vM25.annotation.geneID2name.tsv", col.names = c("gene_id", "gene_name"))
+# removing version
+geneID2name <- geneID2name[,  lapply(.SD, gsub, pattern = "\\..*", replacement = ""), .SDcols = names(geneID2name)]
+# Adding the transgenes
+tg_geneID2name <- DataFrame(gene_id = paste0(c("NLS_EGFP_activeBtgh_NLS", "NLS_EGFP_deadBtgh_NLS"), "_gene"), gene_name = paste0(c("NLS_EGFP_activeBtgh_NLS", "NLS_EGFP_deadBtgh_NLS"), "_gene"))
+geneID2name_w_ex <- rbind(geneID2name, tg_geneID2name)
+
+# Merging the 2 dfs
+gene_map_dt <- as.data.table(merge(geneID2name_w_ex, tx2gene_w_ex, by = "gene_id"))
+
+```
+
+# Design of the experiment
+
+```{r files path}
+
+# directory containing featureCounts outputs
+dir <- "../../data/sequencing/featureCounts/STAR_default"
+# vector of file names
+files <- grep("_counts", sort(list.files(path = dir)), value = TRUE)
+# Excluding samples that got very few number of reads
+files <- files[!(grepl("A19\\.|D2\\.", files))]
+# adding the path
+files_w_path <- file.path(dir, files)
+
+```
+
+```{r reading sample metadata}
+
+# reading table containing sample names and day of collection
+samples_table <- fread("../../data/sequencing/samples_table.csv")
+design_df <- as.data.frame(samples_table)
+# Excluding samples that got very few number of reads
+design_df <- design_df[!(design_df$sample %in% c("mA19","mD2")), ]
+# reading rDNA stats
+rDNA_reads <- fread("../../data/sequencing/stats/rDNA.txt", header = FALSE)
+# sample name and perc of reads mapped to rDNA are in V1 column
+rDNA_reads$sample <- gsub("\\..*", "", rDNA_reads$V1)
+rDNA_reads$perc_rDNA <- as.numeric(gsub("%", "", gsub(".*:", "", rDNA_reads$V1)))
+rDNA_reads <- rDNA_reads[, .(sample, perc_rDNA)]
+# merging rDNA info with design df
+design_df <- merge(design_df, rDNA_reads, by = "sample")
+rownames(design_df) <- design_df$sample # necessary to make dds
+# reordering design df for visualization purposes
+design_df <- design_df[order(design_df$condition, decreasing = TRUE), ]
+
+```
+
+```{r design table, results='asis'}
+
+knitr::kable(design_df, row.names = FALSE)
+
+```
+
+```{r reading counts}
+
+# reading and merging all files in one data.frame by Geneid
+counts_table <- as.data.frame(Reduce(function(...) merge(..., by = c("Geneid")), lapply(files_w_path, function (f) {fread(f)})))
+# simplifying colnames by leaving only the sample name
+colnames(counts_table) <- gsub("HT7W7BGXL_Btgh_injected_morula_22s001634-1-1_Formichetti_lane1", "", gsub(".txt", "", names(counts_table)))
+# adding gene ids as rownames
+rownames(counts_table) <- counts_table$Geneid
+counts_table$Geneid <- NULL
+# removing version from gene ids
+rownames(counts_table) <- gsub("\\..*", "", rownames(counts_table))
+# reordering counts table based on sample order in design df
+counts_table <- counts_table[, rownames(design_df)]
+
+```
+
+# Quality filtering of embryos
+
+```{r adding mt genes in metadata}
+
+# reading mt genes
+mt_genes <- fread("../../data/annotations/gencode.vM25.mt_genes.csv")
+# removing version from gene id
+mt_genes$gene_id <- gsub("\\..*", "", mt_genes$gene_id)
+
+# for each sample, proportion of counts for mt genes
+counts_table_qc <- as.data.table(counts_table)
+counts_table_qc$gene_id <- rownames(counts_table)
+mt_genes_counts <- apply(merge(counts_table_qc, mt_genes, by = "gene_id", all.x = FALSE, all.y = TRUE)[, 2:ncol(counts_table_qc)], 2, sum)
+tot_counts <- apply(counts_table, 2, sum)
+mt_genes_table <- data.table(sample = colnames(counts_table), mt_genes_counts = mt_genes_counts, tot_counts = tot_counts)
+design_df <- merge(design_df, mt_genes_table, by = "sample")
+# reordering design df for visualization purposes
+design_df <- design_df[order(design_df$condition, decreasing = TRUE), ]
+rownames(design_df) <- design_df$sample
+
+```
+
+```{r quality filtering plot, include = TRUE}
+
+ggplot(data = design_df, aes(x = perc_rDNA, y = mt_genes_counts/tot_counts*100, label = sample, color = condition)) +
+  geom_point(size = 4) +
+  geom_text_repel(size = 3) +
+  xlab("perc rDNA reads") +
+  ylab("perc mt genes counts") +
+  theme(title = element_text(size = 20),
+        legend.text = element_text(size = 20), legend.title = element_text(size = 20),
+        axis.text = element_text(size = 19),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+  
+```
+
+I do not exclude any embryos based on above plot.
+
+# Counts of Btgh RNA molecules
+
+```{r creating DESeqDataSet}
+
+# creating DESeqDataSet from count table
+dds <- DESeqDataSetFromMatrix(countData = counts_table,
+                              colData = design_df,
+                              design = ~ condition)
+
+```
+
+```{r prefiltering}
+
+# pre-filtering low count genes in order to speed up the following computations
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+
+```
+
+```{r DESeq function to compute size factors for gene counts}
+
+# the standard differential expression analysis steps are wrapped into a single function, DESeq
+dds <- DESeq(dds)
+
+```
+
+```{r counts of injected RNA molecules, include = TRUE}
+
+tg <- tg_tx2gene$gene_id
+names(tg) <- tg_tx2gene$gene_id
+
+# storing the Btgh gene counts in a df
+Btgh_l <- lapply(1:2, function(g){d <- plotCounts(dds, gene = tg[g], intgroup = c("condition"), returnData = TRUE); d$sample = rownames(d); return(d)})
+Btgh_counts <- merge(Btgh_l[[1]], Btgh_l[[2]], by = c("sample", "condition"))
+names(Btgh_counts) <- c("sample", "condition", "activeBtgh", "deadBtgh")
+
+# plotting Btgh counts
+my_plotCounts <- function (g, my_GOIs, my_dds) {
+  if (sum(grepl(my_GOIs[g], my_dds@rowRanges@partitioning@NAMES)) > 0) {
+    d <- plotCounts(my_dds, gene = my_GOIs[g], intgroup = c("condition"), returnData = TRUE)
+    ggplot(d, aes(x = condition, y = count, label = rownames(d))) + 
+      geom_point(position=position_jitter(w=0.1,h=0), size = 4) + 
+      scale_y_log10() +
+      geom_text_repel(size = 3) +
+      ggtitle(names(my_GOIs)[g]) +
+      theme(title = element_text(size = 20),
+        legend.text = element_text(size = 20), legend.title = element_text(size = 20),
+        axis.text = element_text(size = 19, angle = 60, vjust = 0.5, hjust = 1),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+  }
+}
+
+do.call("ggarrange", args = list(plotlist = lapply(1:2, my_plotCounts, my_dds = dds, my_GOIs = tg), common.legend = TRUE, legend = "right"))
+
+```
+
+```{r saving current counts table for all-stages-plots}
+
+save(counts_table, file = "Rdata/counts_table_w_Btgh.Rdata")
+
+```
+
+Based on the plots above, I exclude samples mA11, mA16, mA7, mD20 because no read mapping to Btgh mRNA is found. From now on, I also remove Btgh from the counts table.
+
+```{r removing poorly injected embryos and transgenes}
+
+rm(dds)
+
+# removing from counts table and design df and excluding transgenes as well from now on
+design_df <- design_df[!(rownames(design_df) %in% c("mA11","mA16", "mA7", "mD20")), ]
+counts_table <- counts_table[!(rownames(counts_table) %in% c("NLS_EGFP_activeBtgh_NLS_gene", "NLS_EGFP_deadBtgh_NLS_gene")), rownames(design_df)]
+
+# rebuilding dds
+dds <- DESeqDataSetFromMatrix(countData = counts_table,
+                              colData = design_df,
+                              design = ~ condition)
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+dds <- DESeq(dds)
+
+```
+
+# Establishing sex of embryos
+
+```{r sexing gene counts}
+
+sexing_genes <- gene_map_dt[gene_name %in% c("Ddx3y", "Xist", "Eif2s3y"), unique(gene_id)]
+names(sexing_genes) <- gene_map_dt[gene_name %in% c("Ddx3y", "Xist", "Eif2s3y"), unique(gene_name)]
+
+get_norm_dds_counts <- function (my_gene_id, my_dds, my_design_df) {
+  return(plotCounts(dds, gene = my_gene_id, intgroup = c("sample", "condition"), returnData = TRUE, normalized = TRUE))
+}
+
+sexing_gene_counts_list <- lapply(sexing_genes, get_norm_dds_counts, my_dds = dds, my_design_df = design_df)
+sfx <- paste0(".", names(sexing_genes))
+sexing_gene_counts <- sexing_gene_counts_list[[1]]
+for(i in head(seq_along(sexing_gene_counts_list), n = -1L)) {
+ sexing_gene_counts <- merge(sexing_gene_counts, sexing_gene_counts_list[[i+1]],
+                            all = TRUE, 
+                            suffixes = sfx[i:(i+1)], 
+                            by = c("sample", "condition"))
+}
+
+```
+
+```{r plot sexing counts, include = TRUE}
+
+ggplot(sexing_gene_counts, aes(x = count.Ddx3y, y = count.Eif2s3y, colour = condition, label = sample)) +
+  geom_point(size = 3) +
+  geom_text_repel(size = 4) +
+  scale_x_log10() +
+  scale_y_log10() +
+  theme(title = element_text(size = 20),
+        legend.text = element_text(size = 20), legend.title = element_text(size = 20),
+        axis.text = element_text(size = 19),
+        legend.key.height = unit(1.5,"line"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+
+```
+
+I define as males those embryos with counts for Ddx3y > 10. mD7, mC21, mD11, mC8 and mD19 are dubious.
+
+```{r adding sex to design df}
+
+design_df <- merge(design_df, sexing_gene_counts, by = c("sample", "condition"))
+design_df$sex <- ifelse(design_df$count.Ddx3y > 10, "M", "F")
+design_df$sex[design_df$sample %in% c("mC21", "mD7", "mD11", "mC8", "mD19")] <- "uncertain"
+rownames(design_df) <- design_df$sample
+
+```
+
+```{r remaking dds w sex info}
+
+rm(dds)
+
+counts_table <- counts_table[, rownames(design_df)]
+
+# rebuilding dds
+dds <- DESeqDataSetFromMatrix(countData = counts_table,
+                              colData = design_df,
+                              design = ~ condition)
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+dds <- DESeq(dds)
+
+```
+
+# Sample clustering
+
+## Heatmap for quality assessment
+
+After applying the log2(n + 1) transformation, I plot heatmaps of normalized counts for top highly expressed genes to check for eventual big sample heterogeneity present in the dataset. 
+
+```{r pheatmap after data transformation, include = TRUE}
+
+highest_expr_hm <- function (my_dds, my_title) {
+  select <- order(rowMeans(counts(my_dds, normalized = FALSE)), decreasing = TRUE)[1:20]
+  design_df_h <- as.data.frame(colData(my_dds)[,"condition"])
+  rownames(design_df_h) <- colnames(counts(my_dds))
+  colnames(design_df_h) <- "condition"
+  my_ntd <- normTransform(my_dds)
+  pheatmap(assay(my_ntd)[select,], cluster_rows = FALSE, show_rownames = TRUE, show_colnames = TRUE, cluster_cols = TRUE, annotation_col = design_df_h, main = my_title)
+}
+
+highest_expr_hm(dds, my_title = "")
+
+```
+
+Highly abundant mitochondrial rRNA genes (such as the ones at the top of the heatmap) show quite some variation among samples. This could drive clustering in future PCAs which is not due to biological differences. However, I remove all rRNA genes from the counts table before proceeding with PCA and the PCA does not change (not shown), therefore I decide to proceed without removing them.
+
+```{r saving objects needed in next Rmd}
+
+save(design_df, file = "Rdata/design_df.Rdata")
+save(gene_map_dt, file = "Rdata/gene_map_dt.Rdata")
+save(geneID2name_w_ex, file = "Rdata/geneID2name_w_ex.Rdata")
+save(counts_table, file = "Rdata/counts_table.Rdata")
+
+```
+
+```{r sessioninfo, echo = TRUE, results = 'markup'}
+
+sessionInfo()
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

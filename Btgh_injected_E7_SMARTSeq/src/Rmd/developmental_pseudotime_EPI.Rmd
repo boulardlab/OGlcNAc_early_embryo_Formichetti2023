@@ -1,0 +1,126 @@
+---
+title: "Developmental pseudotime E7 EPI"
+author: "Sara Formichetti"
+date: '2023-03-09'
+output: html_document
+---
+
+```{r Setting general options, include=FALSE}
+
+knitr::opts_chunk$set(autodep = TRUE, cache = TRUE, echo = FALSE, warning = FALSE, message = FALSE, results = 'hide', fig.width=12, fig.height=8)
+
+```
+
+```{r loading needed packages}
+
+library("DESeq2")
+library(ggplot2)
+library("ggrepel")
+library("vsn")
+library(data.table)
+library(reshape2)
+
+```
+
+```{r loading necessary Rdata}
+
+load("Rdata/dds_EPI_cond.Rdata")
+load("Rdata/gene_map_dt.Rdata")
+load("Rdata/design_df_EPI.Rdata")
+
+```
+
+```{r setting thresholds}
+
+my_mean_threshold <- 10
+
+```
+
+1. I get the list of cell type markers during mouse gastrulation from [Pijuan-Sala et al. 2018 interactive atlas](https://marionilab.cruk.cam.ac.uk/MouseGastrulation2018/). From "cell-type markers", I download the list of marker genes with FDR < 0.1 for various cell types detected at the following stages:
+
+* E6.5 (all cell types)
+* E6.75 (all cell types)
+* E7 (all cell types)
+* E7.25 (some cell types appearing at this stage)
+* E7.5 (some cell types)
+
+2. I remove all markers which are not unique for one cellType-cellStage combination.
+3. I filter out all markers with rowMean < `r my_mean_threshold` among all epiblasts samples in my dataset.
+4. I compute the average expression of the markers belonging to each cellType-stage combination, including E7 nascent mesoderm, which I select as the most indicative considering GSEA result and the stage of dissection.
+5. I compute the average expression of the two de-novo DNMTs (Dnmt3a and Dnmt3b) and Tet1 enzymes.
+6. Scatterplot of 4 vs 5.
+
+```{r reading list of markers}
+
+# list of markers, containing gene names only
+gastrul_markers <- fread("../../data/Marioni_sc_embryo_paper/cellType_markers.csv")
+# ensembl ids corresponding to gene names in data, from Pijuan-Sala et al.
+all_genes_Pijuan <- fread("../../data/Marioni_sc_embryo_paper/genes.tsv", col.names = c("gene_id", "gene_name"))
+gastrul_markers <- merge(gastrul_markers, all_genes_Pijuan, by = "gene_name", all.x = TRUE, all.y = FALSE)
+# selecting only markers with FDR < 0.1
+gastrul_markers <- gastrul_markers[FDR < 0.1]
+# order table by gene_name and then pval
+setorder(gastrul_markers, gene_name, pval)
+
+# some markers are shared between stages - leaving only unique markers
+unique_markers <- gastrul_markers[, .N, by = gene_name]$gene_name[gastrul_markers[, .N, by = gene_name]$N == 1]
+gastrul_markers <- gastrul_markers[gene_name %in% unique_markers]
+
+```
+
+```{r markers avg expression table}
+
+# selecting gastrulation markers from dds counts
+norm_counts <- as.data.frame(counts(dds_EPI_cond, normalized = TRUE))
+norm_counts_g <- norm_counts[rownames(norm_counts) %in% gastrul_markers$gene_id, ]
+# keeping only the ones w rowMean above threshold
+norm_counts_g <- norm_counts_g[rowMeans(norm_counts_g) > my_mean_threshold, ]
+# adding col for gene ids
+norm_counts_g$gene_id <- rownames(norm_counts_g)
+# adding info on gene name and pval/FDR/stage/cellType markers
+norm_counts_g <- as.data.table(merge(norm_counts_g, unique(gastrul_markers[, c("gene_name", "gene_id", "pval", "stage", "cell_type", "FDR")]), by = "gene_id", all.x = TRUE, all.y = FALSE))
+# computing cellType-stage scores as the mean expression of markers for each cellType-stage combination
+markers_score_table <- norm_counts_g[, lapply(.SD,mean), by=.(stage, cell_type), .SDcols = design_df_EPI$sample]
+markers_score_table_m <- melt(markers_score_table, variable.name = "sample", value.name = "markers_expr_mean")
+markers_score_table_m <- merge(markers_score_table_m, design_df_EPI, by = "sample", all.x = TRUE)
+
+```
+
+```{r DNAm genes avg gene expression table}
+
+# de novo DNAm genes
+denovo_DNAm_gene_ids <- unique(gene_map_dt[gene_name %in% c("Dnmt3a", "Dnmt3b", "Tet1"), gene_id])
+
+# selecting DNAm genes from dds counts
+norm_counts_DNAm <- norm_counts[rownames(norm_counts) %in% denovo_DNAm_gene_ids, ]
+# adding col for gene ids
+norm_counts_DNAm$gene_id <- rownames(norm_counts_DNAm)
+# adding info on gene name
+norm_counts_DNAm <- as.data.table(merge(norm_counts_DNAm, unique(gene_map_dt[, .(gene_name, gene_id)]), by = "gene_id", all.x = TRUE, all.y = FALSE))
+# computing mean expression of DNAm genes
+DNAm_score_table <- data.frame(DNAm = apply(norm_counts_DNAm[, design_df_EPI$sample, with = FALSE], 2, mean))
+DNAm_score_table$sample <- rownames(DNAm_score_table)
+
+# merging gastrulation markers and DNAm score tables
+developm_score_table <- as.data.table(merge(markers_score_table_m, DNAm_score_table, by = "sample"))
+
+```
+
+```{r plot DNAm genes corr w mesoderm markers, include = TRUE}
+
+ggplot(developm_score_table[cell_type == "nascent_mesoderm"], aes(x = markers_expr_mean, y = DNAm)) + 
+  geom_point(aes(color = condition), size = 2) +
+  geom_text_repel(aes(label = sample), size = 3) +
+  xlab("nascent mesoderm markers\nmean expression") +
+  ylab("de novo DNMT enzymes\nmean expression") +
+  theme(title = element_text(size = 12),
+    legend.text = element_text(size = 12), legend.title = element_text(size = 12),
+    axis.text = element_text(size = 12),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"))
+
+```
+
+

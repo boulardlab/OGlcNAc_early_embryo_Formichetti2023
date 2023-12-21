@@ -1,0 +1,717 @@
+---
+title: "SMART-Seq2 mRNA-Seq of 96 2cell embryos injected and nonInjected w active/dead-Btgh - embryo filtering and clustering"
+date: "February 18th, 2022"
+author: 
+- name: Sara Formichetti
+  affiliation: EMBL Rome
+  email: sara.formichetti@embl.it
+output:
+  prettydoc::html_pretty:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    fig_caption: yes
+---
+
+```{r Setting general options, include=FALSE}
+
+knitr::opts_chunk$set(autodep = TRUE, cache = TRUE, echo = FALSE, warning = FALSE, message = FALSE, results = 'hide', fig.width=12, fig.height=8)
+
+```
+
+```{r loading needed packages}
+
+library(ggplot2)
+library(reshape2)
+library(data.table)
+library("DESeq2")
+library(ggpubr)
+library(gridExtra)
+library(pheatmap)
+library(ggrepel)
+library(vsn)
+library(RUVSeq)
+library(dplyr)
+
+```
+
+```{r creating tx2gene and geneID2name df}
+
+# Creating the transcriptID2geneID df; the transcriptID2geneID tsv file has been created with custom shell script tx2gene_from_encode_gtf.sh in src/sh folder
+tx2gene <- fread("../../data/annotations/gencode.vM25.annotation.tx2gene.tsv", col.names = c("tx_id", "gene_id"))
+# removing version
+tx2gene <- tx2gene[,  lapply(.SD, gsub, pattern = "\\..*", replacement = ""), .SDcols = names(tx2gene)]
+# Adding to the tx2gene DataFrame the transcript-gene pairs corresponding to the Btgh construct
+tg_tx2gene <- DataFrame(tx_id = paste0(c("NLS_EGFP_activeBtgh_NLS", "NLS_EGFP_deadBtgh_NLS"), "_transcript"), gene_id = paste0(c("NLS_EGFP_activeBtgh_NLS", "NLS_EGFP_deadBtgh_NLS"), "_gene"))
+tx2gene_w_ex <- rbind(tx2gene, tg_tx2gene)
+
+# Creating the geneID2geneName df; the geneID2geneName tsv file has been created with custom shell script geneID2name_from_encode_gtf.sh in src/sh folder
+geneID2name <- fread("../../data/annotations/gencode.vM25.annotation.geneID2name.tsv", col.names = c("gene_id", "gene_name"))
+# removing version
+geneID2name <- geneID2name[,  lapply(.SD, gsub, pattern = "\\..*", replacement = ""), .SDcols = names(geneID2name)]
+# Adding the transgenes
+tg_geneID2name <- DataFrame(gene_id = paste0(c("NLS_EGFP_activeBtgh_NLS", "NLS_EGFP_deadBtgh_NLS"), "_gene"), gene_name = paste0(c("NLS_EGFP_activeBtgh_NLS", "NLS_EGFP_deadBtgh_NLS"), "_gene"))
+geneID2name_w_ex <- rbind(geneID2name, tg_geneID2name)
+
+# Merging the 2 dfs
+gene_map_dt <- as.data.table(merge(geneID2name_w_ex, tx2gene_w_ex, by = "gene_id"))
+
+```
+
+# Design of the experiment
+
+```{r files path}
+
+# directory containing featureCounts outputs
+dir <- "../../data/sequencing/featureCounts/STAR_default"
+# vector of file names
+files <- grep("_counts", sort(list.files(path = dir)), value = TRUE)
+# Excluding samples that got very few number of reads
+files <- files[!(grepl("D43\\.|D2\\.|C7\\.|C42\\.|C4\\.|A56\\.|A38\\.|A27\\.", files))]
+# adding the path
+files_w_path <- file.path(dir, files)
+
+```
+
+```{r reading samples metadata}
+
+# reading table containing sample names and day of collection
+samples_table <- fread("../../data/sequencing/samples_table.csv")
+design_df <- as.data.frame(samples_table)
+# Excluding samples that got very few number of reads
+design_df <- design_df[!(design_df$sample %in% c("D43","D2","C7","C42","C4","A56","A38","A27")), ]
+# Specifying BATCH as a discrete variable
+design_df$batch <- as.character(design_df$batch)
+# reading rDNA stats
+rDNA_reads <- fread("../../data/sequencing/stats/rDNA.txt", header = FALSE)
+# sample name and perc of reads mapped to rDNA are in V1 column
+rDNA_reads$sample <- gsub("\\..*", "", rDNA_reads$V1)
+rDNA_reads$perc_rDNA <- as.numeric(gsub("%", "", gsub(".*:", "", rDNA_reads$V1)))
+rDNA_reads <- rDNA_reads[, .(sample, perc_rDNA)]
+# merging rDNA info with design df
+design_df <- merge(design_df, rDNA_reads, by = "sample")
+rownames(design_df) <- design_df$sample # necessary to make dds
+
+```
+
+```{r design table, results='asis'}
+
+knitr::kable(design_df, row.names = FALSE)
+
+```
+
+```{r reading counts}
+
+# reading and merging all files in one data.frame by Geneid
+counts_table <- as.data.frame(Reduce(function(...) merge(..., by = c("Geneid")), lapply(files_w_path, function (f) {fread(f)})))
+# simplifying colnames by leaving only the sample name
+colnames(counts_table) <- gsub("H3L32BGXL_Btgh_injected_2cells_22s000245-1-1_Formichetti_lane1", "", gsub(".txt", "", names(counts_table)))
+# adding gene ids as rownames
+rownames(counts_table) <- counts_table$Geneid
+counts_table$Geneid <- NULL
+# removing version from gene ids
+rownames(counts_table) <- gsub("\\..*", "", rownames(counts_table))
+# reordering counts table based on sample order in design df
+counts_table <- counts_table[, rownames(design_df)]
+
+```
+
+# Quality filtering of embryos
+
+```{r mt genes in metadata}
+
+# reading mt genes
+mt_genes <- fread("../../data/annotations/gencode.vM25.mt_genes.csv")
+# removing version from gene id
+mt_genes$gene_id <- gsub("\\..*", "", mt_genes$gene_id)
+
+# for each sample, proportion of counts for mt genes
+counts_table_qc <- as.data.table(counts_table)
+counts_table_qc$gene_id <- rownames(counts_table)
+mt_genes_counts <- apply(merge(counts_table_qc, mt_genes, by = "gene_id", all.x = FALSE, all.y = TRUE)[, 2:ncol(counts_table_qc)], 2, sum)
+tot_counts <- apply(counts_table, 2, sum)
+mt_genes_table <- data.table(sample = colnames(counts_table), mt_genes_counts = mt_genes_counts, tot_counts = tot_counts)
+design_df <- merge(design_df, mt_genes_table, by = "sample")
+
+```
+
+```{r quality filtering plot, include = TRUE}
+
+ggplot(data = design_df, aes(x = perc_rDNA, y = mt_genes_counts/tot_counts*100, color = batch, label = sample)) +
+  geom_point(size = 4) +
+  geom_text_repel(size = 3) +
+  xlab("perc rDNA reads") +
+  ylab("perc mt genes counts") +
+  theme(title = element_text(size = 20),
+        legend.text = element_text(size = 20), legend.title = element_text(size = 20),
+        axis.text = element_text(size = 19),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+
+ggplot(data = design_df, aes(x = perc_rDNA, y = mt_genes_counts/tot_counts*100, color = condition)) +
+  geom_point(size = 4) +
+  xlab("perc rDNA reads") +
+  ylab("perc mt genes counts") +
+  theme(title = element_text(size = 20),
+        legend.text = element_text(size = 20), legend.title = element_text(size = 20),
+        axis.text = element_text(size = 19),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+
+```
+
+Based on the above plot, I only exclude sample A34 from the analysis.
+
+```{r excluding bad samples}
+
+design_df <- design_df[design_df$sample != "A34", ]
+rownames(design_df) <- design_df$sample
+counts_table <- counts_table[, rownames(design_df)]
+
+```
+
+```{r saving current counts table for all-stages-plots}
+
+save(counts_table, file = "Rdata/counts_table_w_Btgh.Rdata")
+
+```
+
+# Counts of Btgh RNA molecules
+
+```{r creating DESeqDataSet}
+
+# creating DESeqDataSet from count table
+dds <- DESeqDataSetFromMatrix(countData = counts_table,
+                              colData = design_df,
+                              design = ~ condition)
+
+```
+
+```{r prefiltering}
+
+# pre-filtering low count genes in order to speed up the following computations
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+
+```
+
+```{r DESeq function to compute size factors for gene counts}
+
+# the standard differential expression analysis steps are wrapped into a single function, DESeq
+dds <- DESeq(dds)
+
+```
+
+```{r counts of injected RNA molecules, include = TRUE}
+
+tg <- tg_tx2gene$gene_id
+names(tg) <- tg_tx2gene$gene_id
+
+# storing the Btgh gene counts in a df
+Btgh_l <- lapply(1:2, function(g){d <- plotCounts(dds, gene = tg[g], intgroup = c("condition"), returnData = TRUE); d$sample = rownames(d); return(d)})
+Btgh_counts <- merge(Btgh_l[[1]], Btgh_l[[2]], by = c("sample", "condition"))
+names(Btgh_counts) <- c("sample", "condition", "activeBtgh", "deadBtgh")
+
+# plotting Btgh counts
+my_plotCounts <- function (g, my_GOIs, my_dds) {
+  if (sum(grepl(my_GOIs[g], my_dds@rowRanges@partitioning@NAMES)) > 0) {
+    d <- plotCounts(my_dds, gene = my_GOIs[g], intgroup = c("condition"), returnData = TRUE)
+    ggplot(d, aes(x = condition, y = count, label = rownames(d))) + 
+      geom_point(position=position_jitter(w=0.1,h=0), size = 4) + 
+      scale_y_log10() +
+      geom_text_repel(size = 3) +
+      ggtitle(names(my_GOIs)[g]) +
+      theme(title = element_text(size = 20),
+        legend.text = element_text(size = 20), legend.title = element_text(size = 20),
+        axis.text = element_text(size = 19, angle = 60, vjust = 0.5, hjust = 1),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+  }
+}
+
+
+do.call("ggarrange", args = list(plotlist = lapply(1:2, my_plotCounts, my_dds = dds, my_GOIs = tg), common.legend = TRUE, legend = "right"))
+
+# saving dds with Btgh counts
+save(dds, file = "Rdata/dds_w_Btgh.Rdata")
+
+```
+
+Based on the plots above, I exclude sample D9 and A31 because poorly injected. From now on, I also remove Btgh from the counts table.
+
+```{r removing poorly injected embryos and transgenes}
+
+rm(dds)
+
+# removing from counts table and design df and exclusing transgenes as well from now on
+design_df <- design_df[!(rownames(design_df) %in% c("A31","D9")), ]
+counts_table <- counts_table[!(rownames(counts_table) %in% c("NLS_EGFP_activeBtgh_NLS_gene", "NLS_EGFP_deadBtgh_NLS_gene")), rownames(design_df)]
+
+# rebuilding dds
+dds <- DESeqDataSetFromMatrix(countData = counts_table,
+                              colData = design_df,
+                              design = ~ condition)
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+dds <- DESeq(dds)
+
+```
+
+# Sample clustering
+
+## Heatmap for quality assessment
+
+After applying the log2(n + 1) transformation, I plot heatmaps of normalized counts for top highly expressed genes to check for eventual big sample heterogeneity present in the dataset. 
+
+```{r pheatmap after different transformations, include = TRUE}
+
+highest_expr_hm <- function (my_dds, my_title) {
+  select <- order(rowMeans(counts(my_dds, normalized = FALSE)), decreasing = TRUE)[1:30]
+  design_df_h <- as.data.frame(colData(my_dds)[,c("condition", "batch")])
+  my_ntd <- normTransform(my_dds)
+  pheatmap(assay(my_ntd)[select,], cluster_rows = FALSE, show_rownames = TRUE, show_colnames = TRUE,
+         cluster_cols = TRUE, annotation_col = design_df_h, main = my_title)
+}
+
+highest_expr_hm(dds, my_title = "")
+
+```
+
+The main sample heterogeneity present in the data is between batches. Batch2 tends to have less counts for some genes.
+
+## PCA
+
+```{r defining mean threshold and var genes number threshold}
+
+my_mean_threshold <- 10
+my_ntop <- 1000
+
+```
+
+For this PCA:
+
+1. I start with DESeq2-normalized data
+2. I keep only genes with DESeq2-normalized mean across samples > `r my_mean_threshold`
+3. I apply log2 transformation
+4. I perform PCA with package prcomp using the `r my_ntop` genes with the highest variance
+
+```{r PCA functions}
+
+plotPCA_DESeq_norm_data <- function (my_dds, intgroup, mean_threshold, ntop, returnData = TRUE) {
+    # computing row means of DESeq2-normalized counts
+    rM <- rowMeans2(counts(my_dds, normalized = TRUE))
+    # creating object of normTransformed data i.e. log2 transformed DESeq2-normalized data
+    ntd <- normTransform(my_dds)
+    # keeping only genes with rowMean > my threshold
+    f_norm_counts <- assay(ntd)[rM > mean_threshold, ]
+    # computing row vars of log2 transformed DESeq2-normalized counts
+    rv <- rowVars(f_norm_counts)
+    # selecting the first ntop genes based on var computed on line above
+    select <- order(rv, decreasing = TRUE)[seq_len(min(ntop,length(rv)))]
+    # pca of the selected genes
+    pca <- prcomp(t(f_norm_counts[select, ]))
+    percentVar <- pca$sdev^2/sum(pca$sdev^2)
+    if (!all(intgroup %in% names(colData(my_dds)))) {
+        stop("the argument 'intgroup' should specify columns of colData(dds)")
+    }
+    intgroup.df <- as.data.frame(colData(my_dds)[, intgroup, drop = FALSE])
+    group <- if (length(intgroup) > 1) {
+        factor(apply(intgroup.df, 1, paste, collapse = ":"))
+    }
+    else {
+        colData(my_dds)[[intgroup]]
+    }
+    d <- data.frame(PC1 = pca$x[, 1], PC2 = pca$x[, 2], PC3 = pca$x[, 3], PC4 = pca$x[, 4], intgroup.df, name = colnames(my_dds))
+    if (returnData) {
+        attr(d, "percentVar") <- percentVar[1:4]
+        return(d)
+    }
+}
+
+plotPCA_DESeq_norm <- function (my_dds, intgroup, mean_threshold, ntop, PC_x, PC_y) {
+  pcaData <- plotPCA_DESeq_norm_data(my_dds = my_dds, intgroup = intgroup, mean_threshold = mean_threshold, ntop = ntop, returnData = TRUE)
+  percentVar <- round(100 * attr(pcaData, "percentVar"))
+  par(mfrow=c(2,1))
+  ggplot(pcaData, aes(pcaData[, PC_x], pcaData[, PC_y], color=pcaData[,5], shape=pcaData[,6], label = rownames(pcaData))) +
+    geom_point(size=4) +
+    xlab(paste0("PC",PC_x,": ",percentVar[PC_x],"% variance")) +
+    ylab(paste0("PC",PC_y,": ",percentVar[PC_y],"% variance")) +
+    scale_color_discrete(name = colnames(pcaData)[5]) +
+    scale_shape_discrete(name = colnames(pcaData)[6]) +
+    geom_text_repel(size = 3) +
+    coord_fixed() +
+    theme(axis.text = element_text(size = 22), axis.title = element_text(size = 22),
+        title = element_text(size = 22),
+        legend.text = element_text(size = 22), legend.title = element_text(size = 22),
+        legend.key.height = unit(1.5,"line"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+}
+
+```
+
+```{r PCA plots, include = TRUE}
+
+plotPCA_DESeq_norm(my_dds = dds, intgroup = c("condition", "batch"), mean_threshold = my_mean_threshold, ntop = my_ntop, PC_x = 1, PC_y = 2)
+plotPCA_DESeq_norm(my_dds = dds, intgroup = c("condition", "batch"), mean_threshold = my_mean_threshold, ntop = my_ntop, PC_x = 2, PC_y = 3)
+
+```
+
+Two main conclusions:
+
+* **Unwanted variation correlated with batch** is visible, especially for the injected samples.
+* No clusters correlating with condition.
+
+I will try to remove the unwanted variation using package function **RUVs** of package **RUVSeq**. 
+
+## Removing batch effect and other counfounding factors with RUVs
+
+I use RUVs, which exploits the info of a known grouping of samples to find the factors of unwanted variation. In my case, the known groups are the three conditions. 
+
+```{r RUVs}
+
+# pre-filtering low count genes from counts table
+keep <- rowSums(counts_table) >= 10
+counts_table_f <- counts_table[keep, ]
+
+# Building expression set for RUVSeq
+phenoData <- data.frame(condition = design_df$condition, batch = design_df$batch, row.names = colnames(counts_table_f))
+phenoData <- data.frame(condition = design_df$condition, batch = design_df$batch, row.names = colnames(counts_table), color_cond = rep(c("black", "lightblue", "red"), as.integer(table(design_df$condition)[unique(design_df$condition)])), color_batch = design_df$batch)
+ses <- newSeqExpressionSet(as.matrix(counts_table_f), phenoData = phenoData)
+
+differences <- makeGroups(design_df$condition)
+ses1 <- RUVs(ses, rownames(counts_table_f), k = 1, differences)
+ses2 <- RUVs(ses, rownames(counts_table_f), k = 2, differences)
+ses3 <- RUVs(ses, rownames(counts_table_f), k = 3, differences)
+ses4 <- RUVs(ses, rownames(counts_table_f), k = 4, differences)
+
+```
+
+### Examining RUVs effect via PCA and RLE plots
+
+```{r RUVs effect, include = TRUE}
+
+EDASeq::plotPCA(ses, col=pData(ses)$color_batch, cex=1.2, labels = FALSE, main = "original counts - coloured by batch", k = 3)
+EDASeq::plotPCA(ses, col=pData(ses)$color_cond, cex=1.2, labels = FALSE, main = "original counts - coloured by condition", k = 3)
+EDASeq::plotPCA(ses1, col=pData(ses1)$color_batch, cex=1.2, labels = FALSE, main = "k = 1 - coloured by batch", k = 3)
+EDASeq::plotPCA(ses1, col=pData(ses1)$color_cond, cex=1.2, labels = FALSE, main = "k = 1 - coloured by condition", k = 3)
+EDASeq::plotPCA(ses2, col=pData(ses2)$color_batch, cex=1.2, labels = FALSE, main = "k = 2 - coloured by batch", k = 3)
+EDASeq::plotPCA(ses2, col=pData(ses2)$color_cond, cex=1.2, labels = FALSE, main = "k = 2 - coloured by condition", k = 3)
+EDASeq::plotPCA(ses3, col=pData(ses3)$color_batch, cex=1.2, labels = FALSE, main = "k = 3 - coloured by batch", k = 3)
+EDASeq::plotPCA(ses3, col=pData(ses3)$color_cond, cex=1.2, labels = FALSE, main = "k = 3 - coloured by condition", k = 3)
+EDASeq::plotPCA(ses4, col=pData(ses4)$color_batch, cex=1.2, labels = FALSE, main = "k = 4 - coloured by batch", k = 3)
+EDASeq::plotPCA(ses4, col=pData(ses4)$color_cond, cex=1.2, labels = FALSE, main = "k = 4 - coloured by condition", k = 3)
+
+plotRLE(ses, col=pData(ses)$color_batch, ylim=c(-4, 4), outline = FALSE, main = "original counts")
+plotRLE(ses1, col=pData(ses1)$color_batch, ylim=c(-4, 4), outline = FALSE, main = "k=1")
+plotRLE(ses2, col=pData(ses2)$color_batch, ylim=c(-4, 4), outline = FALSE, main = "k=2")
+
+```
+
+From k = 3 batch effect starts to be minimal --> **I will use the first 3 factors of unwanted variation in DE analysis (DE_analysis.Rmd)**.
+
+I plot the PCA of DESeq2-normalized and log2 transformed data computed as above BUT starting with RUVs adjusted raw counts with k = 3.
+
+### RUVs effect on PCA of DESeq2-normalized and log2 transformed data
+
+```{r dds from RUVs counts}
+
+dds_RUVs <- DESeqDataSetFromMatrix(countData = normCounts(ses3),
+                              colData = design_df,
+                              design = ~ condition)
+keep <- rowSums(counts(dds_RUVs)) >= 10
+dds_RUVs <- dds_RUVs[keep,]
+dds_RUVs <- DESeq(dds_RUVs)
+
+```
+
+```{r PCA plots after RUVs, include = TRUE}
+
+plotPCA_DESeq_norm <- function (my_dds, intgroup, mean_threshold, ntop, PC_x, PC_y) {
+  pcaData <- plotPCA_DESeq_norm_data(my_dds = my_dds, intgroup = intgroup, mean_threshold = mean_threshold, ntop = ntop, returnData = TRUE)
+  percentVar <- round(100 * attr(pcaData, "percentVar"))
+  par(mfrow=c(2,1))
+  ggplot(pcaData, aes(pcaData[, PC_x], pcaData[, PC_y], color=pcaData[,5], label = rownames(pcaData))) +
+    geom_point(size=4) +
+    xlab(paste0("PC",PC_x,": ",percentVar[PC_x],"% variance")) +
+    ylab(paste0("PC",PC_y,": ",percentVar[PC_y],"% variance")) +
+    scale_color_discrete(name = colnames(pcaData)[5]) +
+    coord_fixed() +
+    theme(axis.text = element_text(size = 22), axis.title = element_text(size = 22),
+        title = element_text(size = 22),
+        legend.text = element_text(size = 22), legend.title = element_text(size = 22),
+        legend.key.height = unit(1.5,"line"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+}
+
+plotPCA_DESeq_norm(my_dds = dds_RUVs, intgroup = c("condition"), mean_threshold = my_mean_threshold, ntop = my_ntop, PC_x = 1, PC_y = 2)
+
+```
+
+Some trend based on condition appear in PC1vsPC2 plot, but the variance associated with the PC is very low. 
+
+# Data clustering using list of EGA and mat genes and including Conine 2c data
+
+First of all, I make the DESeq DataSet including both ours and Conine's data. I start from the raw counts for both datasets i.e. before any RUVs adjustment. Then I run the DESeq2 function for the merged raw counts' table.
+
+```{r creating DESeqDataSet w Conine data}
+
+load("Rdata/Conine_dds.Rdata")
+load("Rdata/strictly_mat_DESeq_res.Rdata")
+load("Rdata/strictly_EGA_DESeq_res.Rdata")
+
+# merging counts tables
+Conine_counts_df <- as.data.frame(counts(Conine_dds, normalized = FALSE))
+Conine_counts_df$gene_id <- rownames(Conine_counts_df)
+my_counts_df <- as.data.frame(counts(dds, normalized = FALSE))
+my_counts_df$gene_id <- rownames(my_counts_df)
+counts_Btgh_Conine_df <- merge(my_counts_df, Conine_counts_df, by = "gene_id")
+rownames(counts_Btgh_Conine_df) <- counts_Btgh_Conine_df$gene_id
+# merging design dfs
+design_df_Conine <- as.data.frame(colData(Conine_dds))
+names(design_df_Conine)[2] <- "condition"
+design_df_Conine$batch <- "na"
+design_Btgh_Conine_df <- rbind(design_df[, c("sample", "condition", "batch")], design_df_Conine[, c("sample", "condition", "batch")])
+# reordering counts table's columns based on samples in design df
+counts_Btgh_Conine_df <- counts_Btgh_Conine_df[, design_Btgh_Conine_df$sample]
+
+# creating DESeqDataSet from merged count table and merged design df
+dds_Btgh_Conine <- DESeqDataSetFromMatrix(countData = counts_Btgh_Conine_df,
+                              colData = design_Btgh_Conine_df,
+                              design = ~ condition) # design is not important here because I do not test for Diff Expr
+dds_Btgh_Conine <- DESeq(dds_Btgh_Conine)
+
+```
+
+## heatmap, including Conine data
+
+To build the heatmaps below, I do the following:
+
+1. I start from the DESeq Dataset including ours and Conine's data, already DESeq2-normalized
+2. I perform log2 transformation
+3. I select only genes being strictly maternal/strictly EGA
+4. I filter out genes whose rowMean is < `r my_mean_threshold`
+5. I build the heatmap, scaled by rows, with both genes and samples clustered by correlation.
+
+```{r hm function}
+
+# reordering design df for visualization purposes
+design_df_reordered <- design_df[order(design_df$condition, decreasing = TRUE), ]
+
+library(RColorBrewer)
+
+make_GOIs_hm <- function (my_GOIs_ids, my_title) {
+  # computing row means of DESeq2-normalized counts
+  rM <- rowMeans2(counts(dds_Btgh_Conine, normalized = TRUE))
+  # creating object of normTransformed data i.e. log2 transformed DESeq2-normalized data
+  ntd <- normTransform(dds_Btgh_Conine)
+  # gene ids of GOIs and threshold on rowMeans
+  norm_counts_g <- as.data.frame(assay(ntd)[rownames(assay(ntd)) %in% my_GOIs_ids & rM > my_mean_threshold, ])
+  norm_counts_g$gene_id <- rownames(norm_counts_g)
+  ntd_dt_GOIs <- data.table(norm_counts_g)
+  # Adding info on gene name
+  ntd_dt_GOIs <- merge(ntd_dt_GOIs, geneID2name, by = "gene_id", all.x = TRUE)
+  
+  # Creating matrix needed for pheatmap function
+  ntd_GOIs_hm_mx <- as.matrix(ntd_dt_GOIs[, c(design_df_reordered$sample, Conine_dds$sample), with = FALSE])
+  row.names(ntd_GOIs_hm_mx) <- ntd_dt_GOIs$gene_name
+  # duplicated gene names need to be solved:
+  row.names(ntd_GOIs_hm_mx)[which(duplicated(row.names(ntd_GOIs_hm_mx)))] <- paste0(row.names(ntd_GOIs_hm_mx)[which(duplicated(row.names(ntd_GOIs_hm_mx)))], "_2")
+  
+  # heatmap columns annotation
+  col_anno <- data.frame(condition = c(design_df_reordered$condition, paste0("Conine_", Conine_dds$time_point)), row.names = colnames(ntd_GOIs_hm_mx))
+  col_anno$condition <- factor(col_anno$condition, levels = c("Conine_cauda18", "Conine_cauda28", "non_injected", "dead_Btgh", "active_Btgh"))
+  # heatmap rows annotation
+  row_anno <- data.frame(gene_stage = rep("mat", length(row.names(ntd_GOIs_hm_mx))), row.names = row.names(ntd_GOIs_hm_mx))
+  row_anno$gene_stage[rownames(ntd_GOIs_hm_mx) %in% strictly_EGA_DESeq_res$gene_name] <- "EGA"
+  ntd_GOIs_hm_mx <- ntd_GOIs_hm_mx[order(row_anno$gene_stage, decreasing = TRUE), ]
+  pheatmap(ntd_GOIs_hm_mx, color = colorRampPalette(rev(brewer.pal(n = 7, name =
+  "RdBu")))(100), cluster_rows = TRUE, cluster_cols = TRUE, show_rownames = FALSE, annotation_col = col_anno, annotation_row = row_anno, clustering_distance_rows = "correlation", clustering_distance_cols = "correlation", fontsize = 12, scale = "row", main = my_title)
+}
+  
+```
+
+```{r heatmap my data w Conine (FIGURE), include = TRUE}
+
+make_GOIs_hm(my_GOIs_ids = strictly_EGA_DESeq_res$gene_id, my_title = "EGA genes")
+make_GOIs_hm(my_GOIs_ids = strictly_mat_DESeq_res$gene_id, my_title = "mat genes")
+
+```
+
+Conclusions: 
+
+* our data cluster with post-EGA 2c from the Conine dataset
+* for both EGA and maternal genes, there is no additional clustering among the three experimental groups.
+
+## PCA
+
+For this PCA, I select the first N genes showing highest variance in the Conine table, using cumulatives plot below to decide the N:
+
+```{r cumulative plot to understand which ntop to use, include = TRUE}
+
+cum_rv_plot <- function(my_dds, mean_threshold, my_GOIs_ids, my_title) {
+  # computing row means of DESeq2-normalized counts
+  rM <- rowMeans2(counts(my_dds, normalized = TRUE))
+  # creating object of normTransformed data i.e. log2 transformed DESeq2-normalized data
+  ntd <- normTransform(my_dds)
+  # selecting desired genes with expr higher than threshold
+  norm_counts_g <- assay(ntd)[rownames(assay(ntd)) %in% my_GOIs_ids & rM > mean_threshold, ]
+  # computing row vars of log2 transformed DESeq2-normalized counts
+  rv <- rowVars(norm_counts_g)
+  rv_ordered <- rv[order(rv, decreasing = TRUE)]
+  ggplot(data = data.frame(rv = rv_ordered, i = 1:length(rv_ordered)), aes(x = i, y = cumsum(rv))) + 
+    geom_line() + 
+    geom_point() +
+    ggtitle(my_title)
+} 
+
+cum_rv_plot(Conine_dds, mean_threshold = my_mean_threshold, my_GOIs_ids = strictly_EGA_DESeq_res$gene_id, my_title = "EGA genes")
+cum_rv_plot(Conine_dds, mean_threshold = my_mean_threshold, my_GOIs_ids = strictly_mat_DESeq_res$gene_id, my_title = "mat genes")
+cum_rv_plot(Conine_dds, mean_threshold = my_mean_threshold, my_GOIs_ids = c(strictly_EGA_DESeq_res$gene_id, strictly_mat_DESeq_res$gene_id), my_title = "mat and EGA genes")
+
+```
+
+I choose:
+
+* the first 500 strictly EGA genes
+* the first 500 strictly mat genes
+* the first 200 genes when pooling both
+
+```{r getting most varying genes function}
+
+# Function to get the first N (ntop) genes with highest variance to apply to Conine dataset
+getting_first_ntop_genes <- function(my_dds, mean_threshold, my_GOIs_ids, my_ntop) {
+  # computing row means of DESeq2-normalized counts
+  rM <- rowMeans2(counts(my_dds, normalized = TRUE))
+  # creating object of normTransformed data i.e. log2 transformed DESeq2-normalized data
+  ntd <- normTransform(my_dds)
+  # selecting desired genes with expr higher than threshold
+  norm_counts_g <- assay(ntd)[rownames(assay(ntd)) %in% my_GOIs_ids & rM > mean_threshold, ]
+  # computing row vars of log2 transformed DESeq2-normalized counts
+  rv <- setNames(rowVars(norm_counts_g), rownames(norm_counts_g))
+  rv_ordered <- rv[order(rv, decreasing = TRUE)]
+  return(names(rv_ordered)[1:my_ntop])
+}
+
+mostVar_EGA <- getting_first_ntop_genes(Conine_dds, mean_threshold = my_mean_threshold, my_GOIs_ids = strictly_EGA_DESeq_res$gene_id, my_ntop = 500)
+mostVar_mat <- getting_first_ntop_genes(Conine_dds, mean_threshold = my_mean_threshold, my_GOIs_ids = strictly_mat_DESeq_res$gene_id, my_ntop = 500)
+mostVar_EGAplusMat <- getting_first_ntop_genes(Conine_dds, mean_threshold = my_mean_threshold, my_GOIs_ids = c(strictly_EGA_DESeq_res$gene_id, strictly_mat_DESeq_res$gene_id), my_ntop = 200)
+
+```
+
+```{r PCA mat and EGA genes functions}
+
+plotPCA_DESeq_norm_my_genes_data <- function (my_dds, intgroup, my_gene_ids, mean_threshold, ntop, returnData = TRUE) {
+    # computing row means of DESeq2-normalized counts
+    rM <- rowMeans2(counts(my_dds, normalized = TRUE))  
+    # creating object of normTransformed data i.e. log2 transformed DESeq2-normalized data
+    ntd <- normTransform(my_dds)
+    # selecting desired genes and thresholding on rowMeans
+    norm_counts_g <- assay(ntd)[rownames(assay(ntd)) %in% my_gene_ids & rM > mean_threshold, ]
+    # computing row vars of log2 transformed DESeq2-normalized counts
+    rv <- rowVars(norm_counts_g)
+    # selecting the genes based on var computed on line above
+    select <- order(rv, decreasing = TRUE)[seq_len(min(ntop,length(rv)))]
+    # pca of the selected genes
+    pca <- prcomp(t(norm_counts_g[select, ]))
+    percentVar <- pca$sdev^2/sum(pca$sdev^2)
+    if (!all(intgroup %in% names(colData(my_dds)))) {
+        stop("the argument 'intgroup' should specify columns of colData(dds)")
+    }
+    intgroup.df <- as.data.frame(colData(my_dds)[, intgroup, drop = FALSE])
+    group <- if (length(intgroup) > 1) {
+        factor(apply(intgroup.df, 1, paste, collapse = ":"))
+    }
+    else {
+        colData(my_dds)[[intgroup]]
+    }
+    d <- data.frame(PC1 = pca$x[, 1], PC2 = pca$x[, 2], PC3 = pca$x[, 3], PC4 = pca$x[, 4], intgroup.df, name = colnames(my_dds))
+    if (returnData) {
+        attr(d, "percentVar") <- percentVar[1:4]
+        return(d)
+    }
+}
+
+plotPCA_DESeq_norm_my_genes <- function (my_dds, intgroup, my_gene_ids, mean_threshold, ntop, PC_x, PC_y, my_title) {
+  pcaData <- plotPCA_DESeq_norm_my_genes_data(my_dds = my_dds, intgroup = intgroup, my_gene_ids = my_gene_ids, mean_threshold = mean_threshold, ntop = ntop, returnData = TRUE)
+  percentVar <- round(100 * attr(pcaData, "percentVar"))
+  par(mfrow=c(2,1))
+  ggplot(pcaData, aes(pcaData[, PC_x], pcaData[, PC_y], color=pcaData[,5], label = rownames(pcaData))) +
+    geom_point(size=4, aes(shape = pcaData[,6]), alpha = .7) +
+    xlab(paste0("PC",PC_x,": ",percentVar[PC_x],"% variance")) +
+    ylab(paste0("PC",PC_y,": ",percentVar[PC_y],"% variance")) +
+    scale_color_discrete(name = colnames(pcaData)[5]) +
+    #geom_text_repel(size = 3) +
+    ggtitle(my_title) +
+    coord_fixed() +
+    theme(axis.text = element_text(size = 22), axis.title = element_text(size = 22),
+        title = element_text(size = 22),
+        legend.text = element_text(size = 22), legend.title = element_text(size = 22),
+        legend.key.height = unit(1.5,"line"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+}
+
+```
+
+```{r PCA plots EGA genes (FIGURE), include = TRUE}
+
+plotPCA_DESeq_norm_my_genes(my_dds = dds_Btgh_Conine, intgroup = c("condition", "batch"), my_gene_ids = mostVar_EGAplusMat, mean_threshold = my_mean_threshold, ntop = 200, PC_x = 1, PC_y = 2, my_title = "EGA and mat genes")
+
+```
+
+```{r saving objects needed in next Rmd}
+
+save(design_df, file = "Rdata/design_df.Rdata")
+save(gene_map_dt, file = "Rdata/gene_map_dt.Rdata")
+save(geneID2name_w_ex, file = "Rdata/geneID2name_w_ex.Rdata")
+save(counts_table, file = "Rdata/counts_table.Rdata")
+save(ses3, file = "Rdata/ses3.Rdata")
+
+```
+
+```{r sessioninfo, echo = TRUE, results = 'markup'}
+
+sessionInfo()
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,144 @@
+---
+title: "Btgh counts, Ogt and Oga expression across all analyzed embryonic stages"
+date: "December 19, 2022"
+author: 
+- name: Sara Formichetti
+  affiliation: EMBL Rome
+  email: sara.formichetti@embl.it
+output: html_document
+---
+
+```{r Setting general options, include=FALSE}
+
+knitr::opts_chunk$set(autodep = TRUE, cache = TRUE, echo = FALSE, warning = FALSE, message = FALSE, self.contained = TRUE)
+
+```
+
+```{r loading needed packages}
+
+library("DESeq2")
+library(ggplot2)
+library("ggrepel")
+library(data.table)
+
+```
+
+```{r loading necessary Rdata}
+
+load("Rdata/counts_table_EPI.Rdata")
+load("Rdata/counts_table_TROPHO.Rdata")
+load("Rdata/design_df_EPI.Rdata")
+load("Rdata/design_df_TROPHO.Rdata")
+load("../../../Btgh_injected_morulae_SMARTSeq/src/Rmd/Rdata/counts_table_w_Btgh.Rdata")
+load("../../../Btgh_injected_morulae_SMARTSeq/src/Rmd/Rdata/design_df.Rdata")
+counts_table_m <- counts_table
+design_df_m <- design_df
+load("../../../Btgh_injected_blastocysts_SMARTSeq//src/Rmd/Rdata/counts_table_w_Btgh.Rdata")
+load("../../../Btgh_injected_blastocysts_SMARTSeq/src/Rmd/Rdata/design_df.Rdata")
+counts_table_b <- counts_table
+design_df_b <- design_df
+load("../../../Btgh_injected_2cell_SMARTSeq//src/Rmd/Rdata/counts_table_w_Btgh.Rdata")
+load("../../../Btgh_injected_2cell_SMARTSeq/src/Rmd/Rdata/design_df.Rdata")
+counts_table_2cell <- counts_table
+design_df_2cell <- design_df
+load("Rdata/geneID2name_w_ex.Rdata")
+
+```
+
+```{r merging counts table and design dfs}
+
+# joining counts tables
+counts_table <- do.call("cbind", list(counts_table_2cell, counts_table_m, counts_table_b, counts_table_EPI, counts_table_TROPHO))
+# joining design dfs
+design_df_2cell$sex <- rep("not_applicable", nrow(design_df_2cell))
+design_df <- rbind(design_df_2cell[, c("sample", "condition", "sex", "batch")], design_df_m[, c("sample", "condition", "sex", "batch")], design_df_b[, c("sample", "condition", "sex", "batch")], design_df_EPI[, c("sample", "condition", "sex", "batch")], design_df_TROPHO[, c("sample", "condition", "sex", "batch")])
+# adding stage to design df
+design_df$stage <- c(rep("2-cell", nrow(design_df_2cell)), rep("morulae", nrow(design_df_m)), rep("blastocysts", nrow(design_df_b)), rep("E7 epiblasts", nrow(design_df_EPI)), rep("E7 trophoblasts", nrow(design_df_TROPHO)))
+# keeping only samples that passed all filtering steps. These are the ones left in loaded design dfs
+counts_table <- counts_table[, design_df$sample]
+# design df rownames have to be sample names, in same order as counts table columns
+rownames(design_df) <- design_df$sample
+
+```
+
+```{r creating DESeqDataSet and performing DESeq to get normalized counts}
+
+# creating DESeqDataSet from count table
+dds <- DESeqDataSetFromMatrix(countData = counts_table,
+                              colData = design_df,
+                              design = ~ stage) # design is not important because I am not testing for Diff Expr
+# pre-filtering low count genes in order to speed up the following computations
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+# DESeq function to compute size factors for gene counts normalization
+dds <- DESeq(dds)
+
+```
+
+# Counts of Btgh mRNA molecules
+
+```{r Btgh mRNA molecules counts (FIGURE), include = TRUE}
+
+tg <- grep("Btgh", geneID2name_w_ex$gene_id, value = TRUE)
+names(tg) <- grep("Btgh", geneID2name_w_ex$gene_name, value = TRUE)
+
+# storing the Btgh gene counts in a df
+Btgh_l <- lapply(1:2, function(g){d <- plotCounts(dds, gene = tg[g], intgroup = c("condition", "stage"), returnData = TRUE, normalized = TRUE); d$sample = rownames(d); return(d)})
+Btgh_counts <- merge(Btgh_l[[1]], Btgh_l[[2]], by = c("sample", "condition", "stage"))
+names(Btgh_counts) <- c("sample", "condition", "stage", "activeBtgh", "deadBtgh")
+# summing active and dead Btgh counts
+Btgh_counts$Btgh <- Btgh_counts$activeBtgh + Btgh_counts$deadBtgh
+# relevel stage factor to order x-axis
+Btgh_counts$stage <- factor(Btgh_counts$stage, levels = c("2-cell", "morulae", "blastocysts", "E7 epiblasts", "E7 trophoblasts"))
+
+ggplot(Btgh_counts, aes(x = stage, y = Btgh, color = condition)) + 
+  geom_point(position=position_jitter(w=0.1,h=0), size = 4, alpha = 0.4) + 
+  scale_y_log10() +
+  ylab("Btgh normalized counts") +
+  theme(title = element_text(size = 18),
+        legend.text = element_text(size = 16), legend.title = element_text(size = 16),
+        axis.text = element_text(size = 16, angle = 60, vjust = 0.5, hjust = 1),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+
+```
+
+# Ogt and Oga expression
+
+```{r Ogt and Oga (FIGURE), include = TRUE, fig.height = 8, fig.width = 12}
+
+GOIs <- geneID2name_w_ex$gene_id[grep("Ogt|Oga", geneID2name_w_ex$gene_name)]
+names(GOIs) <- grep("Ogt|Oga", geneID2name_w_ex$gene_name, value = TRUE)
+
+# storing GOIs counts in a df
+GOIs_l <- lapply(1:2, function(g){d <- plotCounts(dds, gene = GOIs[g], intgroup = c("condition", "stage"), returnData = TRUE, normalized = TRUE); d$sample = rownames(d); return(d)})
+GOIs_counts <- merge(GOIs_l[[1]], GOIs_l[[2]], by = c("sample", "condition", "stage"), all = TRUE)
+names(GOIs_counts) <- c("sample", "condition", "stage", "Oga", "Ogt")
+# making long data frame
+GOIs_counts <- reshape2::melt(GOIs_counts, value.name = "count", variable.name = "gene", id.vars = c("sample", "condition", "stage"))
+# relevel stage factor to order x-axis
+GOIs_counts$stage <- factor(GOIs_counts$stage, levels = c("2-cell", "morulae", "blastocysts", "E7 epiblasts", "E7 trophoblasts"))
+
+ggplot(GOIs_counts, aes(x = condition, y = count, color = condition)) +
+  geom_boxplot() +
+  scale_y_log10() +
+  ylab("normalized counts") +
+  facet_grid(gene ~ stage) +
+  theme(title = element_text(size = 18),
+        legend.text = element_text(size = 16), legend.title = element_text(size = 16),
+        axis.text = element_text(size = 16, angle = 60, vjust = 0.5, hjust = 1),
+        strip.text = element_text(size = 16),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+
+```
+
+```{r sessioninfo, echo = TRUE, results = 'markup'}
+
+sessionInfo()
+
+```

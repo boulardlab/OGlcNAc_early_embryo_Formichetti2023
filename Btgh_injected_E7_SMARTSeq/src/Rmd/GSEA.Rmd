@@ -1,0 +1,175 @@
+---
+title: "GSEA of epiblast tissues from embryos injected with active/dead-Btgh"
+date: '2022-09-04'
+author: 
+- name: Sara Formichetti
+  affiliation: EMBL Rome
+  email: sara.formichetti@embl.it
+output:
+  prettydoc::html_pretty:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    fig_caption: yes
+---
+
+I perform GSEA only on the epiblast samples, since the extraembryonic halves did not show measurable differential expression.
+
+```{r Setting general options, include=FALSE}
+
+knitr::opts_chunk$set(autodep = TRUE, cache = TRUE, echo = FALSE, warning = FALSE, message = FALSE, results = 'hide', fig.width=12, fig.height=8)
+
+```
+
+```{r loading needed packages}
+
+library("DESeq2")
+library(ggplot2)
+library("ggrepel")
+library("vsn")
+library(data.table)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(enrichplot)
+library(GOSemSim)
+
+```
+
+```{r loading necessary Rdata}
+
+load("Rdata/res_cond_EPI.Rdata")
+
+```
+
+# Gene Set Enrichment Test
+
+```{r preparing go data for similarity analysis}
+
+mmBP <- godata('org.Mm.eg.db', ont="BP")
+mmMF <- godata('org.Mm.eg.db', ont="MF")
+mmCC <- godata('org.Mm.eg.db', ont="CC")
+
+```
+
+```{r GSEA function}
+
+# choosing similarity cutoff for simplification of gsea results
+sim_cutoff <- 0.8
+
+### Function which simplifies a gse result by semantic similarity, in the same way it is done by the clusterProfiler::simplify function (which however only takes gseGO results) 
+simplify_gse <- function (my_gse_res, my_semdata, my_sim_cutoff = sim_cutoff) {
+  my_gse_sim <- mgoSim(my_gse_res$ID, my_gse_res$ID, semData=my_semdata, measure="Wang", combine=NULL)
+  my_gse_sim.df <- as.data.frame(my_gse_sim)
+  my_gse_sim.df$go1 <- row.names(my_gse_sim.df)
+  my_gse_sim.df <- reshape2::melt(my_gse_sim.df, id.vars = "go1", variable.name = "go2", value.name = "similarity")
+  my_gse_sim.df <- my_gse_sim.df[!is.na(my_gse_sim.df$similarity),]
+  # adding padj of go1
+  my_gse_sim.df <- merge(my_gse_sim.df, my_gse_res[, c("ID", "p.adjust")], by.x="go1", by.y="ID")
+  # adding padj pf go2
+  my_gse_sim.df$go2 <- as.character(my_gse_sim.df$go2)
+  my_gse_sim.df <- merge(my_gse_sim.df, my_gse_res[, c("ID", "p.adjust")], by.x="go2", by.y="ID", suffixes = c(".go1", ".go2"))
+  # df with IDs which have similarity > cutoff
+  to_remove <- my_gse_sim.df[my_gse_sim.df$similarity > sim_cutoff & my_gse_sim.df$similarity != 1, ]
+  # for each pair of IDs, choosing the one with lowest padj  
+  go1_to_remove <- to_remove[to_remove$p.adjust.go1 >= to_remove$p.adjust.go2, "go1"]
+  go2_to_remove <- to_remove[to_remove$p.adjust.go2 > to_remove$p.adjust.go1, "go2"]
+  my_gse_res_f <- my_gse_res[!(my_gse_res$ID %in% unique(c(go1_to_remove, go2_to_remove))), ]
+  return(my_gse_res_f)
+}
+
+### Function which: creates a vector of -log10(pval)*sign(log2FC) for the DESeq result of a specific comparison, sorted in decreasing order and named with gene ids; uses this vector for Gene Set Enrichment Analsysis using package clusterProfiler; simplify the result by semantic similarity
+perform_all_gsea <- function (my_res) {
+  my_rank_stat <- -log10(my_res[my_res$baseMean > 10, ]$pvalue)*sign(my_res[my_res$baseMean > 10, ]$log2FoldChange)
+  my_gene_list <- setNames(object = my_rank_stat, nm = rownames(my_res[my_res$baseMean > 10, ]))
+  # gene list for GSEA needs to be sorted in decreasing order
+  my_gene_list <- my_gene_list[order(my_gene_list, decreasing = TRUE)]
+  my_gene_list <- na.omit(my_gene_list)
+  BP <- gseGO(geneList=my_gene_list, 
+             ont ="BP", 
+             keyType = "ENSEMBL", 
+             minGSSize = 10, 
+             maxGSSize = 500, 
+             pvalueCutoff = 0.05, 
+             verbose = TRUE, 
+             OrgDb = org.Mm.eg.db, 
+             pAdjustMethod = "BH")
+  BP <- setReadable(BP, OrgDb=org.Mm.eg.db, keyType = "ENSEMBL")
+  BP@result <- simplify_gse(BP, my_semdata = mmBP)
+  MF <- gseGO(geneList=my_gene_list, 
+             ont ="MF", 
+             keyType = "ENSEMBL", 
+             minGSSize = 10, 
+             maxGSSize = 500, 
+             pvalueCutoff = 0.05, 
+             verbose = TRUE, 
+             OrgDb = org.Mm.eg.db, 
+             pAdjustMethod = "BH")
+  MF <- setReadable(MF, OrgDb=org.Mm.eg.db, keyType = "ENSEMBL")
+  MF@result <- simplify_gse(MF, my_semdata = mmMF)
+  CC <- gseGO(geneList=my_gene_list, 
+             ont ="CC", 
+             keyType = "ENSEMBL", 
+             minGSSize = 10, 
+             maxGSSize = 500, 
+             pvalueCutoff = 0.05, 
+             verbose = TRUE, 
+             OrgDb = org.Mm.eg.db, 
+             pAdjustMethod = "BH")
+  CC <- setReadable(CC, OrgDb=org.Mm.eg.db, keyType = "ENSEMBL")
+  CC@result <- simplify_gse(CC, my_semdata = mmCC)
+  return(list(BP, MF, CC))
+}
+
+```
+
+```{r perform GSEA EPI}
+
+all_gsea_activeVsDead_EPI <- perform_all_gsea(res_cond_EPI)
+
+```
+
+```{r table of GSEA EPI, results='asis'}
+
+knitr::kable(as.data.frame(all_gsea_activeVsDead_EPI[[1]]), caption = "active vs dead - Biological Process GO")
+knitr::kable(as.data.frame(all_gsea_activeVsDead_EPI[[2]]), caption = "active vs dead - Molecular Function GO")
+knitr::kable(as.data.frame(all_gsea_activeVsDead_EPI[[3]]), caption = "active vs dead - Cellular Component GO")
+
+```
+
+```{r GSEA plots EPI, include = TRUE}
+
+dotplot(all_gsea_activeVsDead_EPI[[1]], showCategory=10, split=".sign", title = "active vs dead - BP GO", font.size = 10) + facet_grid(.~.sign)
+dotplot(all_gsea_activeVsDead_EPI[[2]], showCategory=10, split=".sign", title = "active vs dead - MF GO", font.size = 10) + facet_grid(.~.sign)
+dotplot(all_gsea_activeVsDead_EPI[[3]], showCategory=10, split=".sign", title = "active vs dead - CC GO", font.size = 10) + facet_grid(.~.sign)
+
+```
+
+## FIGURE
+
+```{r GSEA plots EPI (FIGURE), include = TRUE}
+
+library(DOSE)
+library(tidytext)
+
+gsea_res_custom_dt <- as.data.table(fortify(all_gsea_activeVsDead_EPI[[1]], showCategory = nrow(all_gsea_activeVsDead_EPI[[1]]@result)))
+gsea_res_custom_dt$abs_NES <- abs(gsea_res_custom_dt$NES)
+setorder(gsea_res_custom_dt, -abs_NES)
+
+ggplot(gsea_res_custom_dt[1:17], aes(x = GeneRatio, y = reorder_within(Description, GeneRatio, .sign), color = `p.adjust`)) +
+      scale_color_continuous(low="red", high="blue", name = "p.adjust", guide = guide_colorbar(reverse=TRUE)) +
+      geom_point(aes(size=setSize)) +
+      scale_size(range=c(0.5, 5)) +
+      ylab(NULL) +
+      scale_y_reordered() +
+      theme_dose(10) +
+      facet_grid(.~.sign, scales = "free_y") +
+      theme(title = element_text(size = 18),
+            legend.text = element_text(size = 10), legend.title = element_text(size = 10))
+
+```
+
+```{r sessioninfo, echo = TRUE, results = 'markup'}
+
+sessionInfo()
+
+```

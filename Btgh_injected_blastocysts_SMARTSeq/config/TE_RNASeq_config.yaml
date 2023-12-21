@@ -1,0 +1,32 @@
+experiment_folder:
+  "/g/boulard/Projects/Btgh_injected_blastocysts_SMARTSeq/"
+input_samples_table:
+  "data/sequencing/samples_table.csv"
+fastq_input_dir:
+  "data/sequencing/fastq/"
+seq_output_dir:
+  "data/sequencing/"
+genome_dir:
+  "/g/boulard/Projects/BS_RNASeq/data/genome/"
+rDNA_dir:
+  "data/genome/"
+rDNA_fa:
+  "GenBank_BK000964.3.fasta"
+maj_chr_bed:
+  "data/genome/mm10_maj_chr.bed"
+annotation_dir:
+  "data/annotations/"
+gene_annotation_bed:
+  "data/annotations/gencode.vM25.annotation.bed"
+TE_annotation_bed:
+  "data/annotations/RepeatMasker_RepeatLibrary20140131_mm10.bed"
+analysis_output_dir:
+  "analysis/"
+logs_dir:
+  "pipelines_logs/"
+tmp_dir:
+  "tmp/"
+envs_folder:
+  "/g/boulard/Projects/Btgh_injected_blastocysts_SMARTSeq/env/conda/"
+script_dir:
+  "src/"

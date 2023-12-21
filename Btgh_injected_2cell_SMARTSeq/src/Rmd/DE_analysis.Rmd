@@ -1,0 +1,445 @@
+---
+title: "SMART-Seq2 mRNA-Seq of 96 2cell embryos injected and nonInjected w active/dead-Btgh - DE analysis"
+date: "February 22, 2022"
+author: 
+- name: Sara Formichetti
+  affiliation: EMBL Rome
+  email: sara.formichetti@embl.it
+output:
+  prettydoc::html_pretty:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    fig_caption: yes
+---
+
+```{r Setting general options, include=FALSE}
+
+knitr::opts_chunk$set(autodep = TRUE, cache = TRUE, echo = FALSE, warning = FALSE, message = FALSE, results = 'hide', fig.width=12, fig.height=8)
+
+```
+
+```{r loading needed packages}
+
+library(ggplot2)
+library(reshape2)
+library(data.table)
+library("DESeq2")
+library(ggpubr)
+library(gridExtra)
+library(pheatmap)
+library(ggrepel)
+library(vsn)
+library(RUVSeq)
+library(dplyr)
+
+```
+
+```{r function to retrieve gene names res DESeq2}
+
+retrieve_res_names <- function (r) {
+  res_df <- data.frame(gene_id = rownames(r))
+  res_df <- merge(res_df, unique(gene_map_dt[, .(gene_name, gene_id)]), all.x = TRUE, by = "gene_id")
+  res_df$gene_name[is.na(res_df$gene_name)] <- res_df$gene_id[is.na(res_df$gene_name)]
+  return(res_df)
+}
+
+```
+
+```{r function to customize plots DESeq2}
+
+pval_hist <- function (dds_res) {
+  ggplot(as(dds_res, "data.frame"), aes(x = pvalue)) +
+  geom_histogram(binwidth = 0.01, fill = "Royalblue", boundary = 0) +
+  ggtitle(gsub(" vs ", "\nvs ", gsub("(.*condition )|(.*: )", "", mcols(dds_res)$description[4]))) +
+  scale_x_continuous(breaks=c(0.0, 0.5, 1)) +
+  theme(axis.text = element_text(size = 20), axis.title = element_text(size = 20),
+        title = element_text(size = 18),
+        legend.text = element_text(size = 20), legend.title = element_text(size = 20),
+        legend.key.height = unit(1.5,"line"))
+}
+
+MA_plot <- function(dds_res, adjpval, ylims) {
+  DESeq2::plotMA(dds_res, alpha = adjpval, main = gsub("(.*condition )|(.*: )", "", mcols(dds_res)$description[4]), cex.lab = 2, cex.axis = 2, cex.main = 2, ylim = ylims)
+}
+
+```
+
+```{r functions to get and order DESeq results}
+
+get_results_all_comp <- function (my_dds) {
+  res_list <- list(
+    active_vs_dead = lfcShrink(my_dds, contrast=c("condition","active_Btgh","dead_Btgh"), alpha=adjpvalue_cutoff, type="ashr"),
+    active_vs_ctrl = lfcShrink(my_dds, contrast=c("condition","active_Btgh","non_injected"), alpha=adjpvalue_cutoff, type="ashr"),
+    dead_vs_ctrl = lfcShrink(my_dds, contrast=c("condition","dead_Btgh","non_injected"), alpha=adjpvalue_cutoff, type="ashr"))
+  return(res_list)
+}
+
+# Function which takes a DESeq results object and return it as a dataframe, with genes ordered by pvalue and with gene names added; furthermore it writes this dataframe to a file if desired
+pvalue_ranked_DE <- function (my_res, my_DE_dir, writeToFile, my_adjpval, my_gene_name_mapping_table) {
+  # getting name of contrast
+  contrast_name <- gsub(" ", "_", gsub(".*condition ", "", my_res@elementMetadata$description[4]))
+  # removing genes for which padj is NA
+  my_res <- my_res[!(is.na(my_res$padj)), ]
+  # merging the dataframe with the gene names
+  my_res$gene_id <- row.names(my_res)
+  my_res <- merge(as.data.frame(my_res), my_gene_name_mapping_table, by = "gene_id", all.x = TRUE)
+  # ordering by pvalue
+  my_res_ord <- my_res[order(my_res$pvalue),]
+  # keeping only the ones with padj below desired threshold
+  my_res_ord_f <- my_res_ord[my_res_ord$padj < my_adjpval, ]
+  # writing them to file
+  if (writeToFile) {
+    # creating output directory if it does not exist
+    system(paste0("[ -d ", my_DE_dir, " ] || mkdir -p ", my_DE_dir))
+    write.csv(my_res_ord_f, file=paste0(my_DE_dir, contrast_name, "_DEG_by_pvalue.csv"))
+  }
+  return(my_res_ord_f)
+}
+
+```
+
+```{r loading R objs}
+
+load("Rdata/design_df.Rdata")
+load("Rdata/gene_map_dt.Rdata")
+load("Rdata/geneID2name_w_ex.Rdata")
+load("Rdata/counts_table.Rdata")
+load("Rdata/ses3.Rdata")
+
+```
+
+```{r adj pvalue cutoff}
+
+adjpvalue_cutoff <- 0.05
+
+```
+
+```{r DE dir}
+
+# Defining general export directory
+DE_dir <- "../../analysis/DESeq/"
+
+```
+
+# DESeq2 without removing unwanted variation
+
+```{r DESeq, echo = TRUE}
+
+dds <- DESeqDataSetFromMatrix(countData = counts_table,
+                              colData = design_df,
+                              design = ~ condition)
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+dds <- DESeq(dds)
+
+```
+
+```{r DESeq results}
+
+res_all <- get_results_all_comp(dds)
+
+```
+
+## MA-plots
+
+The threshold used for a dot to be colored in blue in the MA-plots is: p-value adjusted < `r adjpvalue_cutoff`.
+
+```{r pvalue histograms and MA-plots, include = TRUE, fig.width=12, fig.height=12}
+
+do.call(grid.arrange, lapply(res_all, pval_hist))
+par(mfrow=c(2,2))
+lapply(res_all, MA_plot, adjpval = adjpvalue_cutoff, ylim = c(-10,10))
+
+```
+
+Almost no Differentially Expressed Genes.
+
+# Accounting for unwanted variation computed by RUVs in DESeq2 design formula
+
+```{r design df w RUVs counfounders, echo = TRUE}
+
+# merging design_df with phenoData from RUVs, which contains the factors of unwanted variation
+pData(ses3)$sample <- rownames(pData(ses3))
+design_df <- merge(design_df, pData(ses3)[, c("sample", grep("W_", colnames(pData(ses3)), value = TRUE))], by = "sample", all = FALSE)
+rownames(design_df) <- design_df$sample
+counts_table <- counts_table[, rownames(design_df)]
+
+```
+
+```{r DESeq w RUVs counfounders, echo = TRUE}
+
+# creating DESeqDataset
+dds_RUVs <- DESeqDataSetFromMatrix(countData = counts_table,
+                                    colData = design_df,
+                                    design = ~ W_1 + W_2 + W_3 + condition)
+# pre-filtering low count genes
+keep <- rowSums(counts(dds_RUVs)) >= 10
+dds_RUVs <- dds_RUVs[keep,]
+# the standard differential expression analysis steps are wrapped into a single function, DESeq
+dds_RUVs <- DESeq(dds_RUVs)
+# DESeq results for all comparisons
+res_all_RUVs <- get_results_all_comp(dds_RUVs)
+
+```
+
+## MA-plots
+
+```{r pvalue histograms and MA-plots w RUVs, include = TRUE, fig.width=12, fig.height=12}
+
+do.call(grid.arrange, lapply(res_all_RUVs, pval_hist))
+par(mfrow=c(2,2))
+lapply(res_all, MA_plot, adjpval = adjpvalue_cutoff, ylim = c(-10,10))
+
+```
+
+### FIGURE
+
+```{r MA-plots (FIGURE), include = TRUE}
+
+custom_MA_plot <- function(my_dds_res, adjpval_to_color, l2fc_to_label, baseMean_to_label, ylim, xmin) {
+  # adding label to genes which are significant and expressed above defined thresholds - labels are gene names
+  my_res_names_df <- retrieve_res_names(my_dds_res)
+  my_dds_res$to_label <- ""
+  my_dds_res$to_label[!is.na(my_dds_res$padj) & my_dds_res$baseMean >= baseMean_to_label & my_dds_res$padj < adjpval_to_color & (my_dds_res$log2FoldChange >= l2fc_to_label | my_dds_res$log2FoldChange <= -l2fc_to_label)] <- my_res_names_df$gene_name[!is.na(my_dds_res$padj) & my_dds_res$baseMean >= baseMean_to_label & my_dds_res$padj < adjpval_to_color & (my_dds_res$log2FoldChange >= l2fc_to_label | my_dds_res$log2FoldChange <= -l2fc_to_label)]
+  # adding label to genes which are significant and expressed above defined thresholds
+  my_dds_res$to_color <- ""
+  my_dds_res$to_color[my_dds_res$padj < adjpval_to_color] <- paste0("adjpval < ", adjpval_to_color)
+  dt_to_plot <- as.data.table(my_dds_res)
+  ggplot(dt_to_plot, aes(x = baseMean, y = log2FoldChange)) +
+    geom_point(aes(color = to_color), alpha = 0.8) +
+    geom_text_repel(aes(label = to_label), size = 3, max.overlaps = 100) +
+    ylim(ylim) +
+    scale_x_log10(limits=c(xmin, max(my_dds_res$baseMean))) +
+    scale_color_manual(values = c("grey", "blue")) +
+    ggtitle(gsub("(.*condition )|(.*: )", "", mcols(my_dds_res)$description[4])) +
+    theme(axis.text = element_text(size = 18), axis.title = element_text(size = 18), 
+          title = element_text(size = 18),
+          legend.position = "none",
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(),
+          axis.line = element_line(colour = "black"),
+          panel.border = element_rect(colour = "black", fill=NA))
+}
+
+lapply(res_all_RUVs, custom_MA_plot, adjpval_to_color = adjpvalue_cutoff, ylim = c(-2,2), xmin = 10, l2fc_to_label = 0.2, baseMean_to_label = 20)
+
+```
+
+```{r ordering an exporting DE genes RUVs}
+
+DE_list_all_RUVs <- lapply(lapply(res_all_RUVs, function (r) {r[r$baseMean > 10, ]}), pvalue_ranked_DE, my_DE_dir = paste0(DE_dir, "RUVs/all/"), writeToFile = TRUE, my_adjpval = adjpvalue_cutoff, my_gene_name_mapping_table = geneID2name_w_ex)
+
+```
+
+## Gene counts for DEGs of interest
+
+```{r plot gene counts (FIGURE), include = TRUE, eval = TRUE}
+
+GOIs_EGA <- geneID2name_w_ex$gene_id[geneID2name_w_ex$gene_name %in% c("Zscan4c", "Zfp352", "Tcstv3", "Arg2", "Sp110", "B020004J07Rik")]
+names(GOIs_EGA) <- geneID2name_w_ex$gene_name[geneID2name_w_ex$gene_name %in% c("Zscan4c", "Zfp352", "Tcstv3", "Arg2", "Sp110", "B020004J07Rik")]
+GOIs_mRNA_metab <- geneID2name_w_ex$gene_id[geneID2name_w_ex$gene_name %in% c("Eif4b", "Larp4", "Ythdf2", "Eif3a")]
+names(GOIs_mRNA_metab) <- geneID2name_w_ex$gene_name[geneID2name_w_ex$gene_name %in% c("Eif4b", "Larp4", "Ythdf2", "Eif3a")]
+GOIs_ribosome <- geneID2name_w_ex$gene_id[geneID2name_w_ex$gene_name %in% c("Rpl10", "Rpl11", "Rpl12", "Rps5")]
+names(GOIs_ribosome) <- geneID2name_w_ex$gene_name[geneID2name_w_ex$gene_name %in% c("Rpl10", "Rpl11", "Rpl12", "Rps5")]
+
+my_boxCounts <- function (g, my_GOIs, my_dds) {
+  if (sum(grepl(my_GOIs[g], my_dds@rowRanges@partitioning@NAMES)) > 0) {
+      d <- plotCounts(my_dds, gene = my_GOIs[g], intgroup = c("condition", "batch"), returnData = TRUE)
+    ggplot(d, aes(x = condition, y = count)) + 
+      geom_boxplot(aes(fill = condition)) +
+      scale_y_log10(limits = ) +
+      ggtitle(names(my_GOIs)[g]) +
+      theme(title = element_text(size = 12),
+        legend.text = element_text(size = 12), legend.title = element_text(size = 16),
+        axis.text = element_text(size = 12, angle = 60, vjust = 0.5, hjust = 1),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+  }
+}
+
+do.call("ggarrange", args = list(plotlist = lapply(1:length(GOIs_EGA), my_boxCounts, my_GOIs = GOIs_EGA, my_dds = dds), common.legend = TRUE, legend = "right"))
+do.call("ggarrange", args = list(plotlist = lapply(1:length(GOIs_mRNA_metab), my_boxCounts, my_GOIs = GOIs_mRNA_metab, my_dds = dds), common.legend = TRUE, legend = "right"))
+do.call("ggarrange", args = list(plotlist = lapply(1:length(GOIs_ribosome), my_boxCounts, my_GOIs = GOIs_ribosome, my_dds = dds), common.legend = TRUE, legend = "right"))
+
+```
+
+## Ribosomal protein gene (RPG) counts
+
+Gene names of mouse ribosomal proteins (Rpl and Rps) are from [RPG database](http://ribosome.med.miyazaki-u.ac.jp/).
+
+```{r boxplot rpl counts, include = TRUE}
+
+# reading names of mouse ribosomal proteins
+ribo_proteins_dt <- fread("../../doc/ribo_proteins_mmus_RPG.csv")
+# adding gene ids
+ribo_proteins_dt <- merge(ribo_proteins_dt, geneID2name_w_ex, by = "gene_name") # all names are mapped.
+
+# get normalized counts of ribo proteins
+ribo_proteins_counts_dt <- as.data.table(counts(dds_RUVs, normalized = TRUE)[row.names(counts(dds_RUVs)) %in% ribo_proteins_dt$gene_id, ])
+ribo_proteins_counts_dt$gene_id <- row.names(counts(dds_RUVs, normalized = TRUE)[row.names(counts(dds_RUVs)) %in% ribo_proteins_dt$gene_id, ])
+# large data table
+ribo_proteins_counts_dt_m <- melt(ribo_proteins_counts_dt, value.name = "norm_counts", variable.name = "sample", id.vars = "gene_id")
+# add gene name and subunit
+ribo_proteins_counts_dt_m <- merge(ribo_proteins_counts_dt_m, ribo_proteins_dt, by = "gene_id")
+# add design info
+ribo_proteins_counts_dt_m <- merge(ribo_proteins_counts_dt_m, design_df[,c("sample", "condition", "batch")], by = "sample")
+# avg count of each gene by condition
+ribo_proteins_counts_dt_m[, c("cond_avg") := lapply(.SD, mean), .SDcols = "norm_counts", by = c("gene_id", "gene_name", "subunit", "condition")]
+# avg counts of all genes per sample
+ribo_proteins_counts_dt_m[, c("sample_avg") := lapply(.SD, mean), .SDcols = "norm_counts", by = "sample"]
+
+## reducing dt for plotting
+ribo_sample_avg <- unique(ribo_proteins_counts_dt_m[, .(sample, condition, sample_avg, batch)])
+# loading dds with Btgh
+load("Rdata/dds_w_Btgh.Rdata")
+tg_tx2gene <- DataFrame(tx_id = paste0(c("NLS_EGFP_activeBtgh_NLS", "NLS_EGFP_deadBtgh_NLS"), "_transcript"), gene_id = paste0(c("NLS_EGFP_activeBtgh_NLS", "NLS_EGFP_deadBtgh_NLS"), "_gene"))
+tg_geneID2name <- DataFrame(gene_id = paste0(c("NLS_EGFP_activeBtgh_NLS", "NLS_EGFP_deadBtgh_NLS"), "_gene"), gene_name = paste0(c("NLS_EGFP_activeBtgh_NLS", "NLS_EGFP_deadBtgh_NLS"), "_gene"))
+tg <- tg_tx2gene$gene_id
+names(tg) <- tg_tx2gene$gene_id
+# storing the Btgh gene counts in a df
+Btgh_l <- lapply(1:2, function(g){d <- plotCounts(dds, gene = tg[g], intgroup = c("condition"), returnData = TRUE); d$sample = rownames(d); return(d)})
+Btgh_counts <- merge(Btgh_l[[1]], Btgh_l[[2]], by = c("sample", "condition"))
+names(Btgh_counts) <- c("sample", "condition", "activeBtgh", "deadBtgh")
+# adding Btgh counts for plotting
+ribo_sample_avg <- merge(ribo_sample_avg, Btgh_counts, by = c("sample", "condition"))
+ribo_sample_avg$Btgh_counts <- ribo_sample_avg$activeBtgh + ribo_sample_avg$deadBtgh
+
+ggplot(data = ribo_sample_avg, aes(x = Btgh_counts, y = sample_avg)) +
+  geom_point(aes(color = condition), show.legend = TRUE) +
+  geom_text_repel(aes(label = sample), max.overlaps = 30, size = 2) +
+  scale_y_continuous(trans = "log2") +
+  theme(axis.text = element_text(angle = 60, vjust = 0.5, hjust = 1),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+
+```
+
+To avoid the possible effect of higher injection load on RPG counts, I remove the active samples with the highest number of Btgh molecules from next boxplot:
+
+```{r boxplot rpl counts 2 (FIGURE), include = TRUE}
+
+# to avoid looking at the effect of higher injection load in active samples, I remove active samples with highest number of Btgh molecules
+ggplot(data = ribo_sample_avg[!(ribo_sample_avg$sample %in% c("A8", "A36", "A6", "A24", "A4"))], aes(x = condition, y = sample_avg)) +
+  geom_boxplot() +
+  geom_point(aes(color = Btgh_counts), show.legend = TRUE, position = position_jitter(w = 0.1, seed = 1)) +
+  geom_text_repel(aes(label = sample), position = position_jitter(w = 0.1, seed = 1)) +
+  scale_y_continuous(trans = "log2", breaks = c(400, 600, 800, 1000), labels = c(400, 600, 800, 1000), limits = c(380, 1000)) +
+  theme(axis.text = element_text(angle = 60, vjust = 0.5, hjust = 1),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+
+```
+
+```{r test difference in last boxplot, results='asis'}
+
+wtest_ad <- wilcox.test(x = ribo_sample_avg$sample_avg[ribo_sample_avg$condition == "active_Btgh" & !(ribo_sample_avg$sample %in% c("A8", "A36", "A6", "A24", "A4"))], y = ribo_sample_avg$sample_avg[ribo_sample_avg$condition == "dead_Btgh"])
+wtest_ac <- wilcox.test(x = ribo_sample_avg$sample_avg[ribo_sample_avg$condition == "active_Btgh" & !(ribo_sample_avg$sample %in% c("A8", "A36", "A6", "A24", "A4"))], y = ribo_sample_avg$sample_avg[ribo_sample_avg$condition == "non_injected"])
+wtest_dc <- wilcox.test(x = ribo_sample_avg$sample_avg[ribo_sample_avg$condition == "dead_Btgh"], y = ribo_sample_avg$sample_avg[ribo_sample_avg$condition == "non_injected"])
+
+```
+
+I test the difference in the distributions shown with last boxplots, using Wilcoxon test:
+
+* pval for active vs dead is `r wtest_ad$p.value`
+* pval for active vs non-inj is `r wtest_ac$p.value`
+* pval for dead vs non-inj is `r wtest_dc$p.value`
+
+So, even if the active vs dead comparison is not significant under threshold pval<0.05, the active vs ctrl is significant while the dead vs ctrl is not.  
+
+# Test for possible slight developmental delay already starting at this stage and causing ribosomal genes downregulation
+
+From the analysis of published dataset GSE66582 [(Wu et al., 2016)](https://www.nature.com/articles/nature18606), spanning preimplantation stages from the oocyte to the blastocyst, in OGlcNAc_early_embryo_Formichetti2023/embryo_public_data_GSE66582_GSE76505_reanalysis/src/Rmd/DE_analysis.Rmd I created a list of genes which are >2x up-regulated from the late 2-cell to the 4-cell stage. 
+
+```{r plot expr 4c genes, include = TRUE}
+
+# reading 4c-specific genes
+up_2to4c <- fread("../../../embryo_public_data_GSE66582_GSE76505_reanalysis/analysis/DE/up_2to4c.csv")
+
+# get their normalized counts
+up_2to4c_gene_counts_dt <- as.data.table(counts(dds_RUVs, normalized = TRUE)[row.names(counts(dds_RUVs)) %in% up_2to4c$gene_id, ])
+up_2to4c_gene_counts_dt$gene_id <- row.names(counts(dds_RUVs, normalized = TRUE)[row.names(counts(dds_RUVs)) %in% up_2to4c$gene_id, ])
+# add gene names
+up_2to4c_gene_counts_dt <- merge(up_2to4c_gene_counts_dt, geneID2name_w_ex, by = "gene_id")
+# large data table
+up_2to4c_gene_counts_dt_m <- melt(up_2to4c_gene_counts_dt, value.name = "norm_counts", variable.name = "sample", id.vars = c("gene_id", "gene_name"))
+# add design info
+up_2to4c_gene_counts_dt_m <- merge(up_2to4c_gene_counts_dt_m, design_df[,c("sample", "condition", "batch")], by = "sample")
+# avg counts of all genes per sample
+up_2to4c_gene_counts_dt_m[, c("sample_avg") := lapply(.SD, mean), .SDcols = "norm_counts", by = "sample"]
+up_2to4c_sample_avg <- unique(up_2to4c_gene_counts_dt_m[, .(sample, condition, sample_avg, batch)])
+
+ggplot(data = up_2to4c_sample_avg, aes(x = condition, y = sample_avg)) +
+  geom_boxplot() +
+  geom_point(aes(color = batch), show.legend = TRUE, position = position_jitter(w = 0.1, seed = 1)) +
+  geom_text_repel(aes(label = sample), position = position_jitter(w = 0.1, seed = 1)) +
+  theme(axis.text = element_text(angle = 60, vjust = 0.5, hjust = 1),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+
+# removing outlier non injected sample C24
+ggplot(data = up_2to4c_sample_avg[!(sample %in% c("C24"))], aes(x = condition, y = sample_avg)) +
+  geom_boxplot() +
+  geom_point(aes(color = batch), show.legend = TRUE, position = position_jitter(w = 0.1, seed = 1)) +
+  geom_text_repel(aes(label = sample), position = position_jitter(w = 0.1, seed = 1)) +
+  theme(axis.text = element_text(angle = 60, vjust = 0.5, hjust = 1),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+
+```
+
+```{r test difference in upregulated 4c genes, results='asis'}
+
+wtest_ad <- wilcox.test(x = up_2to4c_sample_avg$sample_avg[up_2to4c_sample_avg$condition == "active_Btgh"], y = up_2to4c_sample_avg$sample_avg[up_2to4c_sample_avg$condition == "dead_Btgh"])
+wtest_ac <- wilcox.test(x = up_2to4c_sample_avg$sample_avg[up_2to4c_sample_avg$condition == "active_Btgh"], y = up_2to4c_sample_avg$sample_avg[up_2to4c_sample_avg$condition == "non_injected" & !(up_2to4c_sample_avg$sample %in% c("C24"))])
+wtest_dc <- wilcox.test(x = up_2to4c_sample_avg$sample_avg[up_2to4c_sample_avg$condition == "dead_Btgh"], y = up_2to4c_sample_avg$sample_avg[up_2to4c_sample_avg$condition == "non_injected" & !(up_2to4c_sample_avg$sample %in% c("C24"))])
+
+```
+
+There is a slightly lower expression in Btgh-injected embryos. I test the difference in the distributions using Wilcoxon test, after removing C24:
+
+* pval for active vs dead is `r wtest_ad$p.value`
+* pval for active vs non-inj is `r wtest_ac$p.value`
+* pval for dead vs non-inj is `r wtest_dc$p.value`
+
+# RPG vs 2- to 4-cell upregulated genes 
+
+```{r 4c genes - rp genes correlation, include = TRUE}
+
+ribo_4c_dt <- merge(ribo_sample_avg, up_2to4c_sample_avg, by = c("sample", "condition", "batch"), suffixes = c(".rp", ".4cUP"))
+
+ggplot(data = ribo_4c_dt[sample != "C24"], aes(x = sample_avg.rp, y = sample_avg.4cUP)) +
+  geom_point(aes(color = condition), show.legend = TRUE, position = position_jitter(w = 0.1, seed = 1), size = 2.5) +
+  scale_x_continuous(trans = "log2", breaks = c(400, 600, 800, 1000), labels = c(400, 600, 800, 1000), limits = c(400, 1000)) +
+  geom_text_repel(aes(label = sample)) +
+  geom_rug(aes(color = condition), alpha = 0.6) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+
+```
+
+```{r saving R objects}
+
+save(res_all_RUVs, file = "Rdata/res_all_RUVs.Rdata")
+save(res_all, file = "Rdata/res_all.Rdata")
+
+```
+
+```{r sessioninfo, echo = TRUE, results = 'markup'}
+
+sessionInfo()
+
+```

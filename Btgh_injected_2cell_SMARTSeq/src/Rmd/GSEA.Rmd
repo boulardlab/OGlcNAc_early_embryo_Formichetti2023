@@ -1,0 +1,180 @@
+---
+title: "GSEA after DESeq2, using results from DESeq2 run with RUVs-computed confounding factors"
+date: '2022-08-24'
+author: 
+- name: Sara Formichetti
+  affiliation: EMBL Rome
+  email: sara.formichetti@embl.it
+output:
+  prettydoc::html_pretty:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    fig_caption: yes
+---
+
+```{r Setting general options, setup, include=FALSE}
+
+knitr::opts_chunk$set(autodep = TRUE, cache = TRUE, echo = FALSE, warning = FALSE, message = FALSE, results = 'hide', fig.width=12, fig.height=8)
+
+```
+
+```{r loading needed packages, setup}
+
+library("DESeq2")
+library(ggplot2)
+library("ggrepel")
+library("vsn")
+library(data.table)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(enrichplot)
+library(GOSemSim)
+
+```
+
+```{r loading necessary Rdata, setup}
+
+load("Rdata/res_all_RUVs.Rdata")
+load("Rdata/gene_map_dt.Rdata")
+
+```
+
+# Gene Set Enrichment Test
+
+```{r preparing go data for similarity analysis, setup}
+
+mmBP <- godata('org.Mm.eg.db', ont="BP")
+mmMF <- godata('org.Mm.eg.db', ont="MF")
+mmCC <- godata('org.Mm.eg.db', ont="CC")
+
+```
+
+```{r GSEA, setup}
+
+# choosing similarity cutoff for simplification of gsea results
+sim_cutoff <- 0.6
+
+### Function which simplifies a gse result by semantic similarity, in the same way it is done by the clusterProfiler::simplify function (which however only takes gseGO results, this is why the need for a custom function) 
+simplify_gse <- function (my_gse_res, my_semdata, my_sim_cutoff = sim_cutoff) {
+  my_gse_sim <- mgoSim(my_gse_res$ID, my_gse_res$ID, semData=my_semdata, measure="Wang", combine=NULL)
+  my_gse_sim.df <- as.data.frame(my_gse_sim)
+  my_gse_sim.df$go1 <- row.names(my_gse_sim.df)
+  my_gse_sim.df <- reshape2::melt(my_gse_sim.df, id.vars = "go1", variable.name = "go2", value.name = "similarity")
+  my_gse_sim.df <- my_gse_sim.df[!is.na(my_gse_sim.df$similarity),]
+  # adding padj of go1
+  my_gse_sim.df <- merge(my_gse_sim.df, my_gse_res[, c("ID", "p.adjust")], by.x="go1", by.y="ID")
+  # adding padj pf go2
+  my_gse_sim.df$go2 <- as.character(my_gse_sim.df$go2)
+  my_gse_sim.df <- merge(my_gse_sim.df, my_gse_res[, c("ID", "p.adjust")], by.x="go2", by.y="ID", suffixes = c(".go1", ".go2"))
+  # df with IDs which have similarity > cutoff
+  to_remove <- my_gse_sim.df[my_gse_sim.df$similarity > sim_cutoff & my_gse_sim.df$similarity != 1, ]
+  # for each pair of IDs, choosing the one with lowest padj  
+  go1_to_remove <- to_remove[to_remove$p.adjust.go1 >= to_remove$p.adjust.go2, "go1"]
+  go2_to_remove <- to_remove[to_remove$p.adjust.go2 > to_remove$p.adjust.go1, "go2"]
+  my_gse_res_f <- my_gse_res[!(my_gse_res$ID %in% unique(c(go1_to_remove, go2_to_remove))), ]
+  return(my_gse_res_f)
+}
+
+### Function which: creates a vector of -log10(pval)*sign(log2FC) for the DESeq result of a specific comparison, sorted in decreasing order and named with gene ids; uses this vector for Gene Set Enrichment Analysis using package clusterProfiler; simplify the result by semantic similarity
+perform_all_gsea <- function (my_res) {
+  my_rank_stat <- -log10(my_res[my_res$baseMean > 10, ]$pvalue)*sign(my_res[my_res$baseMean > 10, ]$log2FoldChange)
+  my_gene_list <- setNames(object = my_rank_stat, nm = rownames(my_res[my_res$baseMean > 10, ]))
+  # gene list for GSEA needs to be sorted in decreasing order
+  my_gene_list <- my_gene_list[order(my_gene_list, decreasing = TRUE)]
+  my_gene_list <- na.omit(my_gene_list)
+  BP <- gseGO(geneList=my_gene_list, 
+             ont ="BP", 
+             keyType = "ENSEMBL", 
+             minGSSize = 10, 
+             maxGSSize = 500, 
+             pvalueCutoff = 0.05, 
+             verbose = TRUE, 
+             OrgDb = org.Mm.eg.db, 
+             pAdjustMethod = "BH")
+  BP <- setReadable(BP, OrgDb=org.Mm.eg.db, keyType = "ENSEMBL")
+  BP@result <- simplify_gse(BP, my_semdata = mmBP)
+  MF <- gseGO(geneList=my_gene_list, 
+             ont ="MF", 
+             keyType = "ENSEMBL", 
+             minGSSize = 10, 
+             maxGSSize = 500, 
+             pvalueCutoff = 0.05, 
+             verbose = TRUE, 
+             OrgDb = org.Mm.eg.db, 
+             pAdjustMethod = "BH")
+  MF <- setReadable(MF, OrgDb=org.Mm.eg.db, keyType = "ENSEMBL")
+  MF@result <- simplify_gse(MF, my_semdata = mmMF)
+  CC <- gseGO(geneList=my_gene_list, 
+             ont ="CC", 
+             keyType = "ENSEMBL", 
+             minGSSize = 10, 
+             maxGSSize = 500, 
+             pvalueCutoff = 0.05, 
+             verbose = TRUE, 
+             OrgDb = org.Mm.eg.db, 
+             pAdjustMethod = "BH")
+  CC <- setReadable(CC, OrgDb=org.Mm.eg.db, keyType = "ENSEMBL")
+  CC@result <- simplify_gse(CC, my_semdata = mmCC)
+  return(list(BP, MF, CC))
+}
+
+all_gsea_activeVsDead <- perform_all_gsea(res_all_RUVs$active_vs_dead)
+all_gsea_activeVsCtrl <- perform_all_gsea(res_all_RUVs$active_vs_ctrl)
+all_gsea_deadVsCtrl <- perform_all_gsea(res_all_RUVs$dead_vs_ctrl)
+
+```
+
+```{r table of GSEA, results='asis'}
+
+knitr::kable(as.data.frame(all_gsea_activeVsDead[[1]]), caption = "active vs dead - Biological Process GO")
+knitr::kable(as.data.frame(all_gsea_activeVsDead[[2]]), caption = "active vs dead - Molecular Function GO")
+knitr::kable(as.data.frame(all_gsea_activeVsDead[[3]]), caption = "active vs dead - Cellular Component GO")
+knitr::kable(as.data.frame(all_gsea_activeVsCtrl[[1]]), caption = "active vs ctrl - Biological Process GO")
+knitr::kable(as.data.frame(all_gsea_activeVsCtrl[[2]]), caption = "active vs ctrl - Molecular Function GO")
+knitr::kable(as.data.frame(all_gsea_activeVsCtrl[[3]]), caption = "active vs ctrl - Cellular Component GO")
+knitr::kable(as.data.frame(all_gsea_deadVsCtrl[[1]]), caption = "dead vs ctrl - Biological Process GO")
+knitr::kable(as.data.frame(all_gsea_deadVsCtrl[[2]]), caption = "dead vs ctrl - Molecular Function GO")
+knitr::kable(as.data.frame(all_gsea_deadVsCtrl[[3]]), caption = "dead vs ctrl - Cellular Component GO")
+
+```
+
+# Combined GSEA plot
+
+```{r combined GO Enrichment Test plot, setup, include = TRUE}
+
+BP_CC_activeVsDead <- as.data.table(rbind(fortify(all_gsea_activeVsDead[[1]], showCategory = nrow(all_gsea_activeVsDead[[1]]@result)), fortify(all_gsea_activeVsDead[[3]], showCategory = nrow(all_gsea_activeVsDead[[3]]@result))))
+BP_CC_activeVsDead$GO <- rep(c("BP", "CC"), c(nrow(all_gsea_activeVsDead[[1]]@result), nrow(all_gsea_activeVsDead[[3]]@result)))
+BP_CC_activeVsCtrl <- as.data.table(rbind(fortify(all_gsea_activeVsCtrl[[1]], showCategory = nrow(all_gsea_activeVsCtrl[[1]]@result)), fortify(all_gsea_activeVsCtrl[[3]], showCategory = nrow(all_gsea_activeVsCtrl[[3]]@result))))
+BP_CC_activeVsCtrl$GO <- rep(c("BP", "CC"), c(nrow(all_gsea_activeVsCtrl[[1]]@result), nrow(all_gsea_activeVsCtrl[[3]]@result)))
+BP_CC_deadVsCtrl <- as.data.table(fortify(all_gsea_deadVsCtrl[[3]], showCategory = nrow(all_gsea_deadVsCtrl[[3]]@result)))
+BP_CC_deadVsCtrl$GO <- rep(c("CC"), nrow(all_gsea_deadVsCtrl[[3]]@result))
+BP_CC_comb <- rbind(BP_CC_activeVsDead, BP_CC_activeVsCtrl, BP_CC_deadVsCtrl)
+BP_CC_comb$comparison <- rep(c("activeVsDead", "activeVsCtrl", "deadVsCtrl"), c(nrow(BP_CC_activeVsDead), nrow(BP_CC_activeVsCtrl), nrow(BP_CC_deadVsCtrl)))
+BP_CC_comb$abs_NES <- abs(BP_CC_comb$NES) 
+setorder(BP_CC_comb, -abs_NES, GO, comparison)
+# taking first 10 GO for each GO category based on NES
+best_NES_terms <- BP_CC_comb[, .SD[1:min(10,.N)], by=c("GO"), .SDcols = "ID"]$ID
+red_BP_CC_comb <- BP_CC_comb[ID %in% best_NES_terms]
+
+library(DOSE)
+library(tidytext)
+
+ggplot(red_BP_CC_comb, aes(x = GeneRatio, y = reorder_within(Description, GeneRatio, .sign), color = p.adjust)) +
+      scale_color_continuous(low="red", high="blue", name = "p.adjust", guide = guide_colorbar(reverse=TRUE)) +
+      geom_point(aes(size=setSize)) +
+      scale_y_reordered() +
+      scale_size(range=c(0.5, 5)) +
+      ylab(NULL) +
+      theme_dose(10) +
+      facet_grid(GO ~ .sign * comparison, scales = "free_y") +
+      theme(title = element_text(size = 18),
+            legend.text = element_text(size = 10), legend.title = element_text(size = 8))
+
+```
+
+```{r sessioninfo, setup, echo = TRUE, results = 'markup'}
+
+sessionInfo()
+
+```

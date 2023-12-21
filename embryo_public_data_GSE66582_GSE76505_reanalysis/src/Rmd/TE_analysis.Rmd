@@ -1,0 +1,498 @@
+---
+title: "Transposable elements (TE) analysis in public datasets spanning pre- and postimplantation mouse development"
+date: "April 11th, 2023"
+author: 
+- name: Sara Formichetti
+  affiliation: EMBL Rome
+  email: sara.formichetti@embl.it
+output:
+  prettydoc::html_pretty:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    fig_caption: yes
+---
+
+```{r Setting general options, include=FALSE}
+
+knitr::opts_chunk$set(autodep = TRUE, cache = TRUE, echo = FALSE, warning = FALSE, message = FALSE, results = 'hide')
+
+```
+
+```{r loading needed packages}
+
+library(ggplot2)
+library(data.table)
+library(pheatmap)
+library(DESeq2)
+library(gridExtra)
+library(ggrepel)
+library(ggpubr)
+
+```
+
+# Mapping and TE counts stats
+
+Note that:
+
+* STAR parameters were adjusted for trasposable elements analysis (and can be found in embryo_public_data_GSE66582_GSE76505_reanalysis/snake-make/TE_RNASeq_w_Clontech_trim.Snakefile)
+* featureCounts was run using RepeatMasker annotation and for both all TE and only full-length (fl) ones
+
+```{r load sequencing stats}
+
+seq_stat_files <- c("STAR_input_reads.txt", "featureCounts_assigned.txt", "featureCounts_assigned_fl.txt", "STAR_uniquely_mapped.txt", "STAR_multiple_loci.txt", "STAR_too_many_loci.txt")
+names(seq_stat_files) <- gsub("\\.txt", "", seq_stat_files)
+STAR_TE_folder <- "../../data/sequencing/stats/STAR_TE/"
+
+```
+
+```{r samples table}
+
+# loading samples table
+samples_table <- fread("../../data/sequencing/samples_table_TE_analysis.csv")
+names(samples_table)[grep("group_or_time_point", names(samples_table))] <- "stage"
+
+```
+
+```{r STAR stats per stage, include = TRUE}
+
+get_stat_list <- function (my_stat_folder, i, my_stat_files) {
+  # by using fread w these sep and sep2 parameters, the numeric column is always V2
+  stat_dt <- fread(paste0(my_stat_folder, my_stat_files[i]), sep = "\t", sep2 = " ")
+  names(stat_dt) <- c("sample", names(my_stat_files)[i])
+  stat_dt$sample <- gsub("_TE_counts.*", "", gsub("_amgm350.*", "", gsub(".*/", "", stat_dt$sample)))
+  return(stat_dt)
+}
+
+stat_list <- lapply(1:length(seq_stat_files), get_stat_list, my_stat_folder = STAR_TE_folder, my_stat_files = seq_stat_files)
+all_stat_dt <- Reduce(function(...) merge(..., by = c("sample")), stat_list)
+my_cols <- c("sample", names(seq_stat_files)[-1])
+all_stat_melt_dt <- melt(all_stat_dt[, ..my_cols], variable.name = "stat")
+my_cols <- c("sample", "STAR_input_reads")
+all_stat_melt_dt<- merge(all_stat_melt_dt, all_stat_dt[, ..my_cols], by = "sample")
+stats_sample_table <- merge(all_stat_melt_dt, samples_table, by = "sample")
+stats_sample_table$stage <- factor(stats_sample_table$stage, levels = c("MII_oocyte", "zygote", "early_2cell", "2cell", "4cell", "8cell", "E35_ICM", "Inner_cell_mass", "E35_TE", "E40_ICM", "E55_Epi", "E55_VE", "E65_Epi", "E65_VE", "E75_Ecto", "E75_PS", "E75_Meso", "E75_Endo"))
+
+ggplot(data = stats_sample_table, aes(x = stage, y = value/STAR_input_reads*100)) +
+  geom_point() +
+  facet_wrap(vars(stat), ncol = 2, scales = "free_y") +
+  xlab("") +
+  ylab("% of reads") +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r rDNA perc per stage, include = TRUE}
+
+# reading rDNA stats
+rDNA <- fread("../../data/sequencing/stats/rDNA_stats.txt")
+names(rDNA) <- c("sample", "rDNA_perc")
+rDNA_sample_table <- merge(rDNA, samples_table, by = "sample")
+rDNA_sample_table <- merge(rDNA_sample_table, all_stat_dt[,.(sample,STAR_input_reads)], by = "sample")
+rDNA_sample_table_m <- melt(rDNA_sample_table, measure.vars = c("rDNA_perc", "STAR_input_reads"))
+rDNA_sample_table_m$stage <- factor(rDNA_sample_table_m$stage, levels = c("MII_oocyte", "zygote", "early_2cell", "2cell", "4cell", "8cell", "E35_ICM", "Inner_cell_mass", "E35_TE", "E40_ICM", "E55_Epi", "E55_VE", "E65_Epi", "E65_VE", "E75_Ecto", "E75_PS", "E75_Meso", "E75_Endo"))
+
+ggplot(data = rDNA_sample_table_m, aes(x = stage, y = value)) +
+  geom_point(aes(color = stage), show.legend = FALSE) +
+  geom_text_repel(aes(label = sample), size = 2, max.overlaps = 100) +
+  xlab("") +
+  facet_wrap(facets = vars(variable), ncol = 2, scale = "free_y") +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+# Reading TE counts
+
+```{r load featureCounts output tables}
+
+# specifying the directory containing featureCounts outputs
+dir <- "../../data/sequencing/featureCounts/STAR_TE"
+
+# getting file names of featureCounts output count tables, sorted alphabetically
+files <- sort(list.files(path = dir)[grep("counts.txt$", list.files(path = dir))])
+
+# character vector of names of files with path
+files_w_path <- file.path(dir, files)
+
+# reading the count tables: first line is a commented line containing featureCounts command and needs to be skipped; columns chr,start,end,strand are dropped because they contain the comma-separated list of chr,start,end,strand for all occurrences of the TE with that unique repName in the annotation - in case of single copy genes these columns usually contain one value, in this case a list of them because each element is repeated in the genome.
+counts_list <- lapply(files_w_path, function (f) {fread(f, skip = 1, drop = c("Chr", "Start",	"End", "Strand"))})
+# all counts tables have the same dimensions because featureCounts counts for all meta-features (and puts 0 in case there are 0 count for that feature in that sample), therefore there will be no NAs in the reduced dt
+counts_dt <- Reduce(function(...) merge(..., by = c("Geneid", "Length"), all = TRUE), counts_list)
+# remove path from sample names
+names(counts_dt) <- sub(".*/", "", sub("_amgm350.TE_only.bam", "", names(counts_dt)))
+names(counts_dt)[1] <- "repName"
+
+rm(counts_list)
+
+```
+
+```{r merging counts with TE annotation}
+
+# loading TE annotation
+TE_annotation_bed <- "../../data/annotations/RepeatMasker_RepeatLibrary20140131_mm10.noGenes.noSimple.bed"
+TE_anno <- fread(TE_annotation_bed, fill = TRUE, col.names = c("seqnames", "start", "end", "repName", "strand", "repFamClass"), drop = 5)
+# adding +1 to start is necessary for compatibility with methylBase-derived objects because bed file coordinates are 0-based
+TE_anno$start <- TE_anno$start + 1
+# making column with repFamilies only and column with repClasses only
+TE_anno$repFamily <- gsub(".*/", "", TE_anno$repFamClass)
+TE_anno$repClass <- gsub("/.*", "", TE_anno$repFamClass)
+
+# merging the count table with TE annotation to get repFamilies and Classes
+counts_dt <- merge(counts_dt, unique(TE_anno[,c("repName", "repClass", "repFamily", "repFamClass")]), by = "repName", all.x = TRUE, all.y = FALSE)
+# removing rows whose repFamClass is NA
+counts_dt <- counts_dt[!is.na(counts_dt$repFamClass)]
+
+```
+
+The input files are:
+
+* the output tables made by featureCounts (run in rule 'count_on_TE' of the Snakefile), which contain read counts of all repetitive elements (i.e. all repNames) for all samples
+* the repetitive elements annotation `r TE_annotation_bed` (converted to SAF format in rule of Snakefile) used for featureCounts command, that is used to retrieve repFamily and repClass for each repName. The annotation I chose is the most updated library to Nov2020 of rmsk, from which I removed 'Simple repeats' and 'Low complexity regions'
+* a table with total number of reads per sample in raw fastq files 
+* the samples' table, containing metadata (i.e. stage)
+
+```{r ordering based on stage}
+
+# releveling stage for plotting
+samples_table$stage <- factor(samples_table$stage, levels = c("MII_oocyte", "zygote", "early_2cell", "2cell", "4cell", "8cell", "E35_ICM", "Inner_cell_mass", "E35_TE", "E40_ICM", "E55_Epi", "E55_VE", "E65_Epi", "E65_VE", "E75_Ecto", "E75_PS", "E75_Meso", "E75_Endo"))
+setkey(samples_table, stage)
+# ordering counts dt based on samples table
+setcolorder(counts_dt, c("repName", "repClass", "repFamily", "repFamClass", samples_table$sample))
+
+```
+
+# Analysis at family level 
+
+## FPKM for each family of Repetitive Elements
+
+For each family of Repetitive Elements (in case of elements with no repFamily name or repFamilies belonging to more than one repClass I use repClass) I compute **FPKM** values, as follows: for each sample:
+
+* I compute the sum of counts for all elements belonging to that repFamily
+* I divide this sum by the total number of reads for that sample and multiply by 10⁶
+* I divide this number by the total sum of lengths (in Kb) of the elements belonging to that repFamily --> FPKM
+* When specified, **I subtract from each FPKM the total FPKM of all transposons belonging to the DNA repClass**
+
+```{r load library size table}
+
+# loading table containing total number of STAR input reads per sample
+library_size_dt <- fread("../../data/sequencing/stats/STAR_TE/STAR_input_reads.txt")
+library_size_dt$sample <- gsub(".*/", "", gsub("_amgm350.*", "", library_size_dt$V1))
+library_size_dt$STAR_input <- library_size_dt$V2
+library_size_dt <- library_size_dt[, .(sample, STAR_input)]
+# since I counted fragments in featureCounts, I divide the STAR input reads by 2 to get a rough estimation of read pairs
+library_size_dt$library_size <- library_size_dt$STAR_input/2
+# removing bad and poorly injected samples
+library_size_dt <- library_size_dt[library_size_dt$sample %in% samples_table$sample, ]
+# ordering library size as samples and counts table
+library_size_dt <- library_size_dt[match(samples_table$sample, library_size_dt$sample)]
+
+```
+
+```{r family FPKM}
+
+# I notice that some elements do not have a repFamily but they have a repClass and that some repFamilies are assigned to more than one repClass, therefore I use 'repFamClass' to compute the FPKM 
+# selecting columns on which to compute the sum by 'repFamClass'
+cols <- c("Length", names(counts_dt)[names(counts_dt) %in% samples_table$sample])
+# sum by 'repFamClass'
+family_counts_dt <- counts_dt[, lapply(.SD, sum), by = .(repFamClass), .SDcols = cols] 
+# remove rows containing only 0
+family_counts_dt <- family_counts_dt[rowSums(family_counts_dt[, cols[2:length(cols)], with = FALSE]) > 0, ]
+# divide each column by library size and multiply by 10^6
+family_FPKM_dt <- sweep(family_counts_dt[, cols[2:length(cols)], with = FALSE], 2, library_size_dt$library_size/1000000, FUN = '/')
+# divide each row by repFamClass total length
+family_FPKM_dt <- as.data.table(sweep(family_FPKM_dt, 1, family_counts_dt$Length/1000, FUN = '/'))
+family_FPKM_dt$repFamClass <- family_counts_dt$repFamClass
+# subtract DNA transposons' FPKM from each other family's FPKM value
+DNA_TE_FPKM <- setNames(as.numeric(colSums(family_FPKM_dt[grep("DNA/", family_FPKM_dt$repFamClass), 1:(ncol(family_FPKM_dt)-1)])), cols[2:length(cols)])
+family_FPKM_minusDNA_dt <- as.data.table(sweep(family_FPKM_dt[, 1:(ncol(family_FPKM_dt)-1)], 2, DNA_TE_FPKM, FUN = "-"))
+
+# add back columns with repFamilies and repClasses
+family_FPKM_dt$repFamily <- gsub(".*/", "", family_FPKM_dt$repFamClass)
+family_FPKM_dt$repClass <- gsub("/.*", "", family_FPKM_dt$repFamClass)
+family_FPKM_minusDNA_dt$repFamClass <- family_FPKM_dt$repFamClass
+family_FPKM_minusDNA_dt$repFamily <- family_FPKM_dt$repFamily
+family_FPKM_minusDNA_dt$repClass <- family_FPKM_dt$repClass
+
+```
+
+## Heatmaps
+
+The heatmaps are scaled by rows.
+
+```{r heatmap function}
+
+# Custom function for heatmap of repetitive elements from data.table of FPKM
+all_samples_TE_heatmap <- function (my_measures_table, my_samples_table, sample_cluster, elements_cluster, my_title, scale_col) {
+  # making df with only the numeric values
+  pheat_df <- as.data.frame(my_measures_table)[, colnames(my_measures_table) %in% my_samples_table$sample]
+  # rownames appearing on heatmap will be the repFamily names (which are actually the repClass when there is no repFamily assigned to an element)
+  repFamilies <- gsub(".*/", "", my_measures_table$repFamClass)
+  # in cases when one repFamily name is associated to more than one repClass, duplicates are created in repFamilies vector. Using repFamClass in these cases
+  ambigous_rows <- which(duplicated(repFamilies) | duplicated(repFamilies, fromLast=TRUE))
+  repFamilies[ambigous_rows] <- my_measures_table$repFamClass[ambigous_rows]
+  rownames(pheat_df) <- repFamilies
+  # ordering stages
+  my_samples_table$stage <- factor(my_samples_table$stage, levels = c("MII_oocyte", "zygote", "early_2cell", "2cell", "4cell", "8cell", "E35_ICM", "Inner_cell_mass", "E35_TE", "E40_ICM", "E55_Epi", "E55_VE", "E65_Epi", "E65_VE", "E75_Ecto", "E75_PS", "E75_Meso", "E75_Endo"))
+  setkey(my_samples_table, stage)
+  pheat_df <- pheat_df[, my_samples_table$sample]
+  # annotating samples with metadata
+  pheat_anno_samples <- data.frame(stage = my_samples_table$stage, row.names = my_samples_table$sample)
+  # annotating elements with repClasses
+  pheat_anno_elem <- data.frame(repClass = my_measures_table$repClass, repFamilies, row.names = rownames(pheat_df))
+  # ordering TE for better visualization in case no elements clustering is required
+  pheat_df <- pheat_df[order(pheat_anno_elem$repClass), ]
+  pheat_anno_elem <- pheat_anno_elem[rownames(pheat_df), ]
+  pheat_anno_elem$repFamilies <- NULL
+  # removing rows and columns having only 0s
+  pheat_df <- pheat_df[rowSums(pheat_df) != 0, colSums(pheat_df) != 0]
+  if (scale_col) {
+    rn <- rownames(pheat_df)
+    pheat_df <- as.data.frame(apply(pheat_df, 2, scale))
+    rownames(pheat_df) <- rn
+  }
+  # plotting heatmap
+  pheatmap(pheat_df, cluster_rows = elements_cluster, cluster_cols = sample_cluster, annotation_col = pheat_anno_samples, annotation_row = pheat_anno_elem, show_rownames = TRUE, clustering_distance_rows = "correlation", clustering_distance_cols = "correlation", fontsize = 12, scale = "row", main = my_title)
+}
+
+```
+
+### Preimplantation stages only
+
+```{r heatmap subset of elements preimpl, include = TRUE, fig.height=12, fig.width=15}
+
+preimpl_samples_table <- samples_table[samples_table$batch == 1,]
+
+all_samples_TE_heatmap(my_measures_table = family_FPKM_dt[!grepl("DNA|rRNA|\\?|scRNA|Other|snRNA|tRNA|Unknown|srpRNA|RC|^RNA|Satellite", family_FPKM_dt$repFamClass)], my_samples_table = preimpl_samples_table, sample_cluster = FALSE, elements_cluster = FALSE, my_title = "RNA TE FPKM,\n not corrected for DNA traspososons", scale_col = FALSE)
+all_samples_TE_heatmap(my_measures_table = family_FPKM_dt[grepl("rRNA|DNA|RC|Satellite", family_FPKM_dt$repFamClass)], my_samples_table = preimpl_samples_table, sample_cluster = FALSE, elements_cluster = FALSE, my_title = "Contaminants FPKM,\n not corrected for DNA traspososons", scale_col = FALSE)
+all_samples_TE_heatmap(my_measures_table = family_FPKM_minusDNA_dt[!grepl("DNA|rRNA|\\?|scRNA|Other|snRNA|tRNA|Unknown|srpRNA|RC|^RNA|Satellite", family_FPKM_minusDNA_dt$repFamClass)], my_samples_table = preimpl_samples_table, sample_cluster = FALSE, elements_cluster = FALSE, my_title = "RNA TE FPKM,\n corrected for DNA traspososons", scale_col = FALSE)
+all_samples_TE_heatmap(my_measures_table = family_FPKM_minusDNA_dt[grepl("rRNA|DNA|RC|Satellite", family_FPKM_minusDNA_dt$repFamClass)], my_samples_table = preimpl_samples_table, sample_cluster = FALSE, elements_cluster = FALSE, my_title = "Contaminants FPKM,\n corrected for DNA traspososons", scale_col = FALSE)
+
+```
+
+### Postimplantation stages only
+
+```{r heatmap subset of elements postimpl, include = TRUE, fig.height=12, fig.width=15}
+
+postimpl_samples_table <- samples_table[samples_table$batch == 2,]
+
+all_samples_TE_heatmap(my_measures_table = family_FPKM_dt[!grepl("DNA|rRNA|\\?|scRNA|Other|snRNA|tRNA|Unknown|srpRNA|RC|^RNA|Satellite", family_FPKM_dt$repFamClass)], my_samples_table = postimpl_samples_table, sample_cluster = FALSE, elements_cluster = FALSE, my_title = "RNA TE FPKM,\n not corrected for DNA traspososons", scale_col = FALSE)
+all_samples_TE_heatmap(my_measures_table = family_FPKM_dt[grepl("rRNA|DNA|RC|Satellite", family_FPKM_dt$repFamClass)], my_samples_table = postimpl_samples_table, sample_cluster = FALSE, elements_cluster = FALSE, my_title = "Contaminants FPKM,\n not corrected for DNA traspososons", scale_col = FALSE)
+all_samples_TE_heatmap(my_measures_table = family_FPKM_minusDNA_dt[!grepl("DNA|rRNA|\\?|scRNA|Other|snRNA|tRNA|Unknown|srpRNA|RC|^RNA|Satellite", family_FPKM_minusDNA_dt$repFamClass)], my_samples_table = postimpl_samples_table, sample_cluster = FALSE, elements_cluster = FALSE, my_title = "RNA TE FPKM,\n corrected for DNA traspososons", scale_col = FALSE)
+all_samples_TE_heatmap(my_measures_table = family_FPKM_minusDNA_dt[grepl("rRNA|DNA|RC|Satellite", family_FPKM_minusDNA_dt$repFamClass)], my_samples_table = postimpl_samples_table, sample_cluster = FALSE, elements_cluster = FALSE, my_title = "Contaminants FPKM,\n corrected for DNA traspososons", scale_col = FALSE)
+
+```
+
+### All stages
+
+```{r heatmap subset of elements all, include = TRUE, fig.height=12, fig.width=15}
+
+all_samples_TE_heatmap(my_measures_table = family_FPKM_dt[!grepl("DNA|rRNA|\\?|scRNA|Other|snRNA|tRNA|Unknown|srpRNA|RC|^RNA|Satellite", family_FPKM_dt$repFamClass)], my_samples_table = samples_table, sample_cluster = FALSE, elements_cluster = FALSE, my_title = "RNA TE FPKM,\n not corrected for DNA traspososons", scale_col = FALSE)
+all_samples_TE_heatmap(my_measures_table = family_FPKM_dt[grepl("rRNA|DNA|RC|Satellite", family_FPKM_dt$repFamClass)], my_samples_table = samples_table, sample_cluster = FALSE, elements_cluster = FALSE, my_title = "Contaminants FPKM,\n not corrected for DNA traspososons", scale_col = FALSE)
+all_samples_TE_heatmap(my_measures_table = family_FPKM_minusDNA_dt[!grepl("DNA|rRNA|\\?|scRNA|Other|snRNA|tRNA|Unknown|srpRNA|RC|^RNA|Satellite", family_FPKM_minusDNA_dt$repFamClass)], my_samples_table = samples_table, sample_cluster = FALSE, elements_cluster = FALSE, my_title = "RNA TE FPKM,\n corrected for DNA traspososons", scale_col = FALSE)
+all_samples_TE_heatmap(my_measures_table = family_FPKM_minusDNA_dt[grepl("rRNA|DNA|RC|Satellite", family_FPKM_minusDNA_dt$repFamClass)], my_samples_table = samples_table, sample_cluster = FALSE, elements_cluster = FALSE, my_title = "Contaminants FPKM,\n corrected for DNA traspososons", scale_col = FALSE)
+
+```
+
+Based on all above plots, I remove the E5.5 VE samples and early 2-cell sample SRR2927028 and replot.
+
+```{r removing bad samples}
+
+# removing E5.5 samplesbased on rDNA percentage
+samples_table <- samples_table[!(samples_table$sample %in% c("SRR2927028", "SRR3083899", "SRR3083907", "SRR3083908", "SRR3083903_SRR3083904", "SRR3083905_SRR3083906"))]
+# releveling stage for plotting
+samples_table$stage <- factor(samples_table$stage, levels = c("MII_oocyte", "zygote", "early_2cell", "2cell", "4cell", "8cell", "E35_ICM", "Inner_cell_mass", "E35_TE", "E40_ICM", "E65_Epi", "E65_VE", "E75_Ecto", "E75_PS", "E75_Meso", "E75_Endo"))
+setkey(samples_table, stage)
+# ordering counts dt based on samples table
+setcolorder(counts_dt, c("repName", "repClass", "repFamily", "repFamClass", samples_table$sample))
+
+```
+
+```{r heatmap subset of elements all after filtering, include = TRUE, fig.height=12, fig.width=15}
+
+all_samples_TE_heatmap(my_measures_table = family_FPKM_dt[!grepl("DNA|rRNA|\\?|scRNA|Other|snRNA|tRNA|Unknown|srpRNA|RC|^RNA|Satellite", family_FPKM_minusDNA_dt$repFamClass)], my_samples_table = samples_table, sample_cluster = FALSE, elements_cluster = FALSE, my_title = "RNA TE FPKM,\n not corrected for DNA traspososons", scale_col = FALSE)
+all_samples_TE_heatmap(my_measures_table = family_FPKM_dt[grepl("rRNA|DNA|RC|Satellite", family_FPKM_minusDNA_dt$repFamClass)], my_samples_table = samples_table, sample_cluster = FALSE, elements_cluster = FALSE, my_title = "Contaminants FPKM,\n not corrected for DNA traspososons", scale_col = FALSE)
+all_samples_TE_heatmap(my_measures_table = family_FPKM_minusDNA_dt[!grepl("DNA|rRNA|\\?|scRNA|Other|snRNA|tRNA|Unknown|srpRNA|RC|^RNA|Satellite", family_FPKM_minusDNA_dt$repFamClass)], my_samples_table = samples_table, sample_cluster = FALSE, elements_cluster = FALSE, my_title = "RNA TE FPKM,\n corrected for DNA traspososons", scale_col = FALSE)
+all_samples_TE_heatmap(my_measures_table = family_FPKM_minusDNA_dt[grepl("rRNA|DNA|RC|Satellite", family_FPKM_minusDNA_dt$repFamClass)], my_samples_table = samples_table, sample_cluster = FALSE, elements_cluster = FALSE, my_title = "Contaminants FPKM,\n corrected for DNA traspososons", scale_col = FALSE)
+
+```
+
+Note that when correcting for DNA FPKM preimplantation embryonic stages get penalized compared to the oocyte i.e. oocyte FPKM values are overestimated.
+
+# DE-Seq analysis of RNA transposons - preimplantation stages only
+
+I include the **FPKM of DNA repetitive elements as confounding factors in DESeq2 formula**.
+
+```{r creating DESeq inputs}
+
+preimpl_samples_table <- samples_table[samples_table$batch == 1,]
+preimpl_counts_dt <- counts_dt[, c("repName", "repClass", "repFamily", "repFamClass", preimpl_samples_table$sample, "Length"), with = FALSE]
+
+# Selecting only RNA transposons and only columns with numeric values
+RNA_TE_counts_dt <- preimpl_counts_dt[!grepl("DNA|rRNA|\\?|scRNA|Other|snRNA|tRNA|Unknown|srpRNA|RC|^RNA|Satellite", preimpl_counts_dt$repClass), preimpl_samples_table$sample, with = FALSE]
+
+# A count matrix will be the input for DESeq
+counts_m <- as.matrix(RNA_TE_counts_dt)
+rownames(counts_m) <- preimpl_counts_dt[!grepl("DNA|rRNA|\\?|scRNA|Other|snRNA|tRNA|Unknown|srpRNA|RC|^RNA|Satellite", counts_dt$repClass), ]$repName
+# the design df is created from the samples_table
+design_df <- data.frame(stage = preimpl_samples_table$stage, batch = preimpl_samples_table$batch)
+# the rownames of the design df have to be the same (and in the same order) of the colnames of the count matrix
+rownames(design_df) <- preimpl_samples_table$sample
+# adding another DNA transposons FPKM as an additional variable, that can be used as counfounding factor
+design_df$sample <- rownames(design_df)
+design_df$DNA_FPKM <- DNA_TE_FPKM[design_df$sample]
+design_df$batch <- as.character(design_df$batch)
+
+```
+
+```{r creating DESeq Dataset}
+
+dds <- DESeqDataSetFromMatrix(countData = counts_m,
+                              colData = design_df,
+                              design = ~ DNA_FPKM + stage)
+
+```
+
+Before running the Differential Expression analysis, the data are pre-filtered to remove all repetitive elements with < 10 reads among all samples.
+
+```{r prefiltering}
+
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+
+```
+
+```{r DESeq function}
+
+dds <- DESeq(dds)
+
+```
+
+# Results
+
+```{r adj pvalue cutoff}
+
+adjpvalue_cutoff <- 0.1
+l2fc_cutoff_to_label <- 0.2
+baseMean_cutoff_to_label <- 10
+
+```
+
+```{r DESeq results list}
+
+# Function which extracts DESeq results (with shrunken log2FC) for all comparisons
+get_results_all_comp <- function (my_dds) {
+  res_list <- list(
+    zygote = lfcShrink(my_dds, contrast=c("stage","zygote","MII_oocyte"), alpha=adjpvalue_cutoff, type="ashr"),
+    preEGA_2c = lfcShrink(my_dds, contrast=c("stage","early_2cell","zygote"), alpha=adjpvalue_cutoff, type="ashr"),
+    postEGA_2c = lfcShrink(my_dds, contrast=c("stage","2cell","early_2cell"), alpha=adjpvalue_cutoff, type="ashr"),
+    postEGA_2c_to_zygote = lfcShrink(my_dds, contrast=c("stage","2cell","zygote"), alpha=adjpvalue_cutoff, type="ashr"),
+    fourCell = lfcShrink(my_dds, contrast=c("stage","4cell","2cell"), alpha=adjpvalue_cutoff, type="ashr"),
+    eightCell = lfcShrink(my_dds, contrast=c("stage","8cell","4cell"), alpha=adjpvalue_cutoff, type="ashr"),
+    ICM = lfcShrink(my_dds, contrast=c("stage","Inner_cell_mass","8cell"), alpha=adjpvalue_cutoff, type="ashr"))
+  return(res_list)
+}
+
+# extracting result table from the DESeq analysis for all comparisons
+res_list <- get_results_all_comp(dds)
+
+```
+
+```{r ranked DE genes}
+
+# Function which takes a DESeq results object and return it as a dataframe, with genes ordered by pvalue and filtered by adjusted pvalue
+pvalue_ranked_DE <- function (my_res) {
+  # keeping only genes with adjusted pvalue below my threshold
+  my_res_f <- subset(my_res, padj < adjpvalue_cutoff)
+  # ordering by pvalue
+  my_res_f_ord <- my_res_f[order(my_res_f$pvalue),]
+  my_res_f_ord$repName <- rownames(my_res_f_ord)
+  return(my_res_f_ord)
+}
+
+pvalue_ranked_DE_list <- lapply(res_list, pvalue_ranked_DE)
+
+```
+
+I exclude the comparisons including the preEGA 2c stage because, after filtering bad samples, this stage includes only one biological replicate. 
+
+```{r DE TEs, results='asis'}
+
+knitr::kable(as.data.frame(pvalue_ranked_DE_list[[1]]), caption = "zygote vs MII oocyte")
+knitr::kable(as.data.frame(pvalue_ranked_DE_list[[4]]), caption = "postEGA 2c vs zygote")
+knitr::kable(as.data.frame(pvalue_ranked_DE_list[[5]]), caption = "fourCell vs postEGA 2c")
+knitr::kable(as.data.frame(pvalue_ranked_DE_list[[6]]), caption = "eightCell vs postEGA 2c")
+
+```
+
+## MA-plots
+
+```{r customizing plots DESeq2}
+
+pval_hist <- function (my_dds_res) {
+  ggplot(as(my_dds_res, "data.frame"), aes(x = pvalue)) +
+  geom_histogram(binwidth = 0.01, fill = "Royalblue", boundary = 0) +
+  ggtitle(gsub(".*: stage ", "", mcols(my_dds_res)$description[4])) +
+  scale_x_continuous(breaks=c(0.0, 0.5, 1)) +
+  theme(axis.text = element_text(size = 20), axis.title = element_text(size = 20),
+        title = element_text(size = 18),
+        legend.text = element_text(size = 20), legend.title = element_text(size = 20),
+        legend.key.height = unit(1.5,"line"))
+}
+
+MA_plot_TE <- function(my_dds_res, adjpval_to_color, l2fc_to_label, baseMean_to_label, ylims) {
+  # adding label to genes which are significant and expressed above defined thresholds
+  my_dds_res$to_label <- ""
+  my_dds_res$to_label[my_dds_res$baseMean >= baseMean_to_label & my_dds_res$padj < adjpval_to_color & (my_dds_res$log2FoldChange >= l2fc_to_label | my_dds_res$log2FoldChange <= -l2fc_to_label)] <- rownames(my_dds_res[my_dds_res$baseMean >= baseMean_to_label & my_dds_res$padj < adjpval_to_color & (my_dds_res$log2FoldChange >= l2fc_to_label | my_dds_res$log2FoldChange <= -l2fc_to_label), ])
+  my_dds_res$to_color <- ""
+  my_dds_res$to_color[my_dds_res$padj < adjpval_to_color] <- paste0("adjpval < ", adjpval_to_color)
+  dt_to_plot <- as.data.table(my_dds_res)
+  dt_to_plot$repName <- rownames(my_dds_res)
+  # adding color by repFamily to genes which are significant and expressed above defined thresholds
+  dt_to_plot <- merge(dt_to_plot, unique(TE_anno[,.(repName,repFamily)]), by = "repName")
+  dt_to_plot$to_color <- dt_to_plot$repFamily
+  dt_to_plot$to_color[dt_to_plot$padj >= adjpval_to_color] <- ""
+  my.cols <- brewer.pal(length(unique(dt_to_plot$to_color)), "Paired")
+  my.cols[1] <- "grey"
+  ggplot(dt_to_plot, aes(x = baseMean, y = log2FoldChange)) +
+    geom_point(aes(color = to_color), alpha = 0.8) +
+    geom_text_repel(aes(label = to_label), size = 4, max.overlaps = 10, show.legend = FALSE) +
+    scale_x_log10() +
+    ylim(ylims) +
+    scale_color_manual(values = my.cols) +
+    ggtitle(gsub(".*: stage ", "", mcols(my_dds_res)$description[4])) +
+    theme(axis.text = element_text(size = 20), axis.title = element_text(size = 20),
+          title = element_text(size = 20),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(),
+          axis.line = element_line(colour = "black"),
+          panel.border = element_rect(colour = "black", fill=NA))
+}
+
+```
+
+In the MA-plots:
+
+* The threshold used for a dot to be coloured based on repFamily is p-value adjusted < `r adjpvalue_cutoff`.
+* Transposable elements whose mean expression > `r baseMean_cutoff_to_label` and log2FoldChange > `r l2fc_cutoff_to_label` (or < -`r l2fc_cutoff_to_label`) are labeled (but labeling is limited by max.overlap parameter).
+
+```{r MA plots, include = TRUE, fig.width=27, fig.height=24}
+
+library(RColorBrewer)
+do.call(grid.arrange, lapply(res_list[c(1,4,5,6,7)], function (r) {MA_plot_TE(r, adjpval_to_color = adjpvalue_cutoff, l2fc_to_label = l2fc_cutoff_to_label, baseMean_to_label = baseMean_cutoff_to_label, ylims = c(-10,10))}))
+
+```
+
+```{r sessioninfo, setup, echo = TRUE, results = 'markup'}
+
+sessionInfo()
+
+```

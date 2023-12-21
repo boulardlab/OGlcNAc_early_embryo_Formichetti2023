@@ -1,0 +1,326 @@
+---
+title: "DESeq2 between preimplantation stages using public dataset"
+date: "November 14, 2023"
+author: 
+- name: Sara Formichetti
+  affiliation: EMBL Rome
+  email: sara.formichetti@embl.it
+output: html_document
+---
+
+# Main aim
+
+Finding genes that characterize the transition between the late 2-cell and 4-cell stage (last section of the report), to use for testing potential developmental delay of late 2-cell embryos upon nuclear O-GlcNAc removal.
+
+```{r Setting general options, include=FALSE}
+
+knitr::opts_chunk$set(autodep = TRUE, cache = TRUE, echo = FALSE, warning = FALSE, message = FALSE, self.contained = TRUE)
+
+```
+
+```{r loading needed packages}
+
+library("DESeq2")
+library("tximport")
+library(ggplot2)
+library(reshape2)
+library(data.table)
+library("ggrepel")
+library(ggpubr)
+library(gplots)
+library(gridExtra)
+
+```
+
+# SRA samples metadata
+
+```{r reading sample metadata}
+
+SRA_RunTable <- fread("../../data/sequencing/SraRunTable_selection.csv")
+
+# counting technical replicates based on Experiment ID
+SRA_RunTable[, c("tech_rep") := lapply(.SD, function(ds){seq(1, length(ds))}), .SDcols = "Consent", by = "Experiment"]
+# counting biological replicates
+SRA_RunTable[, c("biol_rep") := lapply(.SD, function(ds){seq(1, length(ds))}), .SDcols = "tech_rep", by = c("Developmental_Stage", "tech_rep")]
+# make sample name as combination of stage, tech rep and biological rep
+SRA_RunTable$sample <- paste0(gsub(" ", "_", SRA_RunTable$Developmental_Stage), ".", SRA_RunTable$biol_rep, ".", SRA_RunTable$tech_rep)
+# order stage
+SRA_RunTable$Developmental_Stage <- factor(SRA_RunTable$Developmental_Stage, levels = c("MII oocyte", "Zygote", "early 2-cell", "2-cell", "4-cell", "8-cell", "E3.5_ICM", "E3.5_TE", "E4.0_ICM", "Inner cell mass", "Embryonic stem cell", "E5.5_Epi", "E5.5_VE", "E6.5_Epi", "E6.5_VE", "E7.5_Ecto", "E7.5_PS", "E7.5_Meso", "E7.5_Endo"))
+setorder(SRA_RunTable, Developmental_Stage, biol_rep, tech_rep)
+rownames(SRA_RunTable) <- SRA_RunTable$sample # necessary to in case make dds
+
+```
+
+```{r SRA run table, results='asis'}
+
+knitr::kable(SRA_RunTable, row.names = FALSE)
+
+```
+
+```{r creating tx2gene and geneID2name df}
+
+# Creating the transcriptID2geneID df; the transcriptID2geneID tsv file has been created with custom shell script tx2gene_from_encode_gtf.sh in src/sh folder
+tx2gene <- fread("../../data/annotations/gencode.vM25.annotation.tx2gene.tsv", col.names = c("tx_id", "gene_id"))
+# removing version
+tx2gene <- tx2gene[,  lapply(.SD, gsub, pattern = "\\..*", replacement = ""), .SDcols = names(tx2gene)]
+
+# Creating the geneID2geneName df; the geneID2geneName tsv file has been created with custom shell script geneID2name_from_encode_gtf.sh in src/sh folder
+geneID2name <- fread("../../data/annotations/gencode.vM25.annotation.geneID2name.tsv", col.names = c("gene_id", "gene_name"))
+# removing version
+geneID2name <- geneID2name[,  lapply(.SD, gsub, pattern = "\\..*", replacement = ""), .SDcols = names(geneID2name)]
+
+# Merging the 2 dfs
+gene_map_dt <- as.data.table(merge(geneID2name, tx2gene, by = "gene_id"))
+
+```
+
+```{r creating the txi object}
+
+# specifying the directory containing Salmon outputs
+dir <- "../../data/sequencing/Salmon"
+
+files <- sort(list.files(path = dir))
+
+# making the  character vector of names of Salmon quantification's files
+files_w_path <- file.path(dir, files)
+
+# tximport gene level summarization of transcripts' quantification
+txi <- tximport(files_w_path, type="salmon", tx2gene=tx2gene, ignoreTxVersion = TRUE)
+
+```
+
+```{r design df}
+
+design_df <- data.frame(sample = SRA_RunTable$sample, stage_rep = gsub("\\.[1-9]$", "", SRA_RunTable$sample))
+design_df$stage <- gsub("\\.[1-9]$", "", design_df$stage_rep)
+  
+```
+
+```{r creating the DESeqDataSet}
+
+# renaming columns of txi matrices object as the sample names
+colnames(txi$counts) <- design_df$sample
+colnames(txi$abundance) <- design_df$sample
+colnames(txi$length) <- design_df$sample
+
+# only selected stages
+design_df_s <- design_df[design_df$stage %in% c("Zygote", "2-cell", "4-cell", "8-cell", "Inner_cell_mass", "E3.5_ICM"), ]
+txi_s <- txi
+txi_s$counts <- txi$counts[, design_df_s$sample]
+txi_s$abundance <- txi$abundance[, design_df_s$sample]
+txi_s$length <- txi$length[, design_df_s$sample]
+
+design_df_s$stage <- factor(design_df_s$stage, levels = c("Zygote", "2-cell", "4-cell", "8-cell", "Inner_cell_mass", "E3.5_ICM"))
+
+# Creating DESeqDataSet
+ddsTxi <- DESeqDataSetFromTximport(txi_s,
+                                  colData = design_df_s,
+                                  design = ~ stage)
+
+```
+
+```{r prefiltering}
+
+keep <- rowSums(counts(ddsTxi)) >= 10
+ddsTxi <- ddsTxi[keep,]
+
+```
+
+```{r DESeq function}
+
+# the standard differential expression analysis steps are wrapped into a single function, DESeq
+ddsTxi <- DESeq(ddsTxi)
+# it is necessary to relevel stage factor
+ddsTxi$stage = relevel(ddsTxi$stage, ref = "Zygote")
+
+```
+
+After applying, in order, log2(norm counts + 1), rlog and Variance Stabilizing Transformation, I plot heatmaps for top highly expressed genes to check for eventual big sample heterogeneity present in the dataset. 
+
+```{r pheatmap after different transformations, include = TRUE}
+
+library(pheatmap)
+
+highest_expr_hm <- function (my_dds, my_transformation) {
+  select <- order(rowMeans(counts(my_dds, normalized = FALSE)), decreasing = TRUE)[1:30]
+  design_df_h <- as.data.frame(colData(my_dds)[,c("stage", "stage_rep")])
+  if (my_transformation == "log2") {
+    dds_t <- normTransform(my_dds)
+  } else if (my_transformation == "rlog") {
+    dds_t <- rlog(my_dds, blind = TRUE)
+  } else if (my_transformation == "vst") {
+    dds_t <- vst(my_dds, blind = TRUE)
+  }
+  pheatmap(assay(dds_t)[select,], cluster_rows = FALSE, show_rownames = TRUE, show_colnames = TRUE, cluster_cols = TRUE, annotation_col = design_df_h, main = paste0(my_transformation, " transformation"))
+}
+
+highest_expr_hm(my_dds = ddsTxi, my_transformation = "log2")
+highest_expr_hm(my_dds = ddsTxi, my_transformation = "rlog")
+highest_expr_hm(my_dds = ddsTxi, my_transformation = "vst")
+
+```
+
+Based on the heatmap, I exclude outlier replicate Inner cell mass 1.1 and rebuild the dds.
+
+```{r recreating the DESeqDataSet}
+
+rm(ddsTxi)
+
+design_df_s <- design_df_s[design_df_s$sample !=  "Inner_cell_mass.1.1", ]
+txi_s$counts <- txi_s$counts[, design_df_s$sample]
+txi_s$abundance <- txi_s$abundance[, design_df_s$sample]
+txi_s$length <- txi_s$length[, design_df_s$sample]
+
+ddsTxi <- DESeqDataSetFromTximport(txi_s,
+                                    colData = design_df_s,
+                                    design = ~ stage)
+keep <- rowSums(counts(ddsTxi)) >= 10
+ddsTxi <- ddsTxi[keep,]
+# the standard differential expression analysis steps are wrapped into a single function, DESeq
+ddsTxi <- DESeq(ddsTxi)
+# it is necessary to relevel stage factor
+ddsTxi$stage = relevel(ddsTxi$stage, ref = "Zygote")
+
+```
+
+```{r DE analysis results}
+
+adjpvalue_cutoff <- 0.05
+res_2cell <- lfcShrink(ddsTxi, contrast=c("stage","2-cell","Zygote"), alpha=adjpvalue_cutoff, type="ashr")
+res_2to4 <- lfcShrink(ddsTxi, contrast=c("stage","4-cell","2-cell"), alpha=adjpvalue_cutoff, type="ashr")
+res_4to8 <- lfcShrink(ddsTxi, contrast=c("stage","8-cell","4-cell"), alpha=adjpvalue_cutoff, type="ashr")
+res_8toBlasto <- lfcShrink(ddsTxi, contrast=c("stage","Inner_cell_mass","8-cell"), alpha=adjpvalue_cutoff, type="ashr")
+res_8toBlasto_2 <- lfcShrink(ddsTxi, contrast=c("stage","E3.5_ICM","8-cell"), alpha=adjpvalue_cutoff, type="ashr")
+all_res_2toblasto <- list(twocell = res_2cell, twoToFour = res_2to4, fourToEight = res_4to8, eightToBlasto = res_8toBlasto, eightToEarlyBlasto = res_8toBlasto_2)
+
+```
+
+```{r function to retrieve gene names res DESeq2}
+
+retrieve_res_names <- function (r) {
+  res_df <- data.frame(gene_id = rownames(r))
+  res_df <- merge(res_df, unique(gene_map_dt[, .(gene_name, gene_id)]), all.x = TRUE, by = "gene_id")
+  res_df$gene_name[is.na(res_df$gene_name)] <- res_df$gene_id[is.na(res_df$gene_name)]
+  return(res_df)
+}
+
+```
+
+```{r customizing plots DESeq2}
+
+pval_hist <- function (dds_res) {
+  ggplot(as(dds_res, "data.frame"), aes(x = pvalue)) +
+  geom_histogram(binwidth = 0.01, fill = "Royalblue", boundary = 0) +
+  ggtitle(gsub(" vs ", "\nvs ", gsub("(.*stage )|(.*: )", "", mcols(dds_res)$description[4]))) +
+  scale_x_continuous(breaks=c(0.0, 0.5, 1)) +
+  theme(axis.text = element_text(size = 20), axis.title = element_text(size = 20),
+        title = element_text(size = 18),
+        legend.text = element_text(size = 20), legend.title = element_text(size = 20),
+        legend.key.height = unit(1.5,"line"))
+}
+
+custom_MA_plot <- function(my_dds_res, adjpval_to_color, l2fc_to_label, baseMean_to_label) {
+  # adding label to genes which are significant and expressed above defined thresholds - labels are gene names
+  my_res_names_df <- retrieve_res_names(my_dds_res)
+  my_dds_res$to_label <- ""
+  my_dds_res$to_label[!is.na(my_dds_res$padj) & my_dds_res$baseMean >= baseMean_to_label & my_dds_res$padj < adjpval_to_color & (my_dds_res$log2FoldChange >= l2fc_to_label | my_dds_res$log2FoldChange <= -l2fc_to_label)] <- my_res_names_df$gene_name[!is.na(my_dds_res$padj) & my_dds_res$baseMean >= baseMean_to_label & my_dds_res$padj < adjpval_to_color & (my_dds_res$log2FoldChange >= l2fc_to_label | my_dds_res$log2FoldChange <= -l2fc_to_label)]
+  # adding label to genes which are significant and expressed above defined thresholds
+  my_dds_res$to_color <- ""
+  my_dds_res$to_color[my_dds_res$padj < adjpval_to_color] <- paste0("adjpval < ", adjpval_to_color)
+  dt_to_plot <- as.data.table(my_dds_res)
+  ggplot(dt_to_plot, aes(x = baseMean, y = log2FoldChange)) +
+    geom_point(aes(color = to_color), alpha = 0.8) +
+    geom_text_repel(aes(label = to_label), size = 3, max.overlaps = 30) +
+    scale_x_log10(limits = c(10,NA)) +
+    scale_color_manual(values = c("grey", "blue")) +
+    ggtitle(gsub(".*: stage ", "", mcols(my_dds_res)$description[4])) +
+    theme(axis.text = element_text(size = 20), axis.title = element_text(size = 20), 
+          title = element_text(size = 20),
+          legend.position = "none",
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(),
+          axis.line = element_line(colour = "black"),
+          panel.border = element_rect(colour = "black", fill=NA))
+}
+
+```
+
+# MA-plots
+
+```{r pvalue histograms, include = TRUE, fig.height=10, fig.width=12}
+
+baseMean_cutoff_to_label <- 20
+log2FC_threshold <- 2
+
+do.call(grid.arrange, lapply(all_res_2toblasto, pval_hist))
+
+```
+
+```{r MA-plots, include = TRUE}
+
+baseMean_cutoff_to_label <- 20
+log2FC_threshold <- 2
+
+lapply(all_res_2toblasto, custom_MA_plot, adjpval_to_color = adjpvalue_cutoff, l2fc_to_label = log2FC_threshold, baseMean_to_label = 10)
+
+```
+
+Note: After the 4-cell stage, the DE analyses do not give many hits.
+
+# 2- to 4-cell upregulated genes
+
+```{r function to rank DE genes}
+
+# Function which takes a DESeq results object and return it as a dataframe, with genes ordered by pvalue, filtered by adjusted pvalue and baseMean and with gene names added; furthermore it writes this dataframe to a file if desired
+pvalue_ranked_DE <- function (my_res, my_DE_dir, writeToFile, my_adjpval, my_gene_name_mapping_table, my_baseMean_cutoff) {
+  # getting name of contrast
+  contrast_name <- gsub(" ", "_", gsub("(.*stage )|(.*: )", "", mcols(my_res)$description[4]))
+  # removing genes for which padj is NA
+  my_res <- my_res[!(is.na(my_res$padj)), ]
+  # merging the dataframe with the gene names
+  my_res$gene_id <- row.names(my_res)
+  my_res <- merge(as.data.frame(my_res), my_gene_name_mapping_table, by = "gene_id", all.x = TRUE)
+  # ordering by pvalue
+  my_res_ord <- my_res[order(my_res$pvalue),]
+  # keeping only the ones with padj below desired threshold and baseMean above threshold
+  my_res_ord_f <- my_res_ord[my_res_ord$padj < my_adjpval & my_res_ord$baseMean > my_baseMean_cutoff, ]
+  # writing them to file
+  if (writeToFile) {
+    # creating output directory if it does not exist
+    system(paste0("[ -d ", my_DE_dir, " ] || mkdir -p ", my_DE_dir))
+    write.csv(my_res_ord_f, file=paste0(my_DE_dir, contrast_name, "_DEG_by_pvalue.csv"))
+  }
+  return(my_res_ord_f)
+}
+
+```
+
+```{r ordering and exporting DE genes}
+
+DE_dir = "../../analysis/DE/"
+
+pvalue_ranked_DE_list <- lapply(all_res_2toblasto, pvalue_ranked_DE, my_DE_dir = DE_dir, writeToFile = TRUE, my_adjpval = adjpvalue_cutoff, my_baseMean_cutoff = 10, my_gene_name_mapping_table = geneID2name)
+
+```
+
+```{r 2- to 4c up genes, echo = TRUE}
+
+# load TPM table
+TPM_avg_dt <- fread("../../analysis/TPM_avg_all_stages.csv") # file created in DNAmeEnzymes_and_BtghE7DEGs_dynamics.Rmd
+names(TPM_avg_dt) <- gsub("-", "", names(TPM_avg_dt))
+
+# upper quartile of expr 4-cell
+perc_4cell <- quantile(TPM_avg_dt[TPM_avg_dt$`4cell` > 1]$`4cell`, probs = seq(0,1,0.25))[4]
+# genes with Ok expr in 2- and 4-cell
+expr_2to4_up <- TPM_avg_dt[`2cell` > 1 & `4cell` > perc_4cell]$gene_id
+up_2To4c <- pvalue_ranked_DE_list$twoToFour[pvalue_ranked_DE_list$twoToFour$log2FoldChange > 2 & pvalue_ranked_DE_list$twoToFour$gene_id %in% expr_2to4_up,]
+write.csv(up_2To4c, file = "../../analysis/DE/up_2to4c.csv", quote = FALSE)
+
+```
+
+```{r sessioninfo, echo = TRUE, results = 'markup'}
+
+sessionInfo()
+
+```

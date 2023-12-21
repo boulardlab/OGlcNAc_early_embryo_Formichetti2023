@@ -1,0 +1,253 @@
+---
+title: "Ogt and Oga isoforms expression across early embryonic development"
+date: "December 16, 2022"
+author: 
+- name: Sara Formichetti
+  affiliation: EMBL Rome
+  email: sara.formichetti@embl.it
+output: html_document
+---
+
+```{r Setting general options, include=FALSE}
+
+knitr::opts_chunk$set(autodep = TRUE, cache = TRUE, echo = FALSE, warning = FALSE, message = FALSE, self.contained = TRUE)
+
+```
+
+```{r loading needed packages}
+
+library("tximport")
+library(ggplot2)
+library(reshape2)
+library(data.table)
+
+```
+
+# SRA samples metadata
+
+```{r reading sample metadata}
+
+SRA_RunTable <- fread("../../data/sequencing/SraRunTable_selection.csv")
+
+# counting technical replicates based on Experiment ID
+SRA_RunTable[, c("tech_rep") := lapply(.SD, function(ds){seq(1, length(ds))}), .SDcols = "Consent", by = "Experiment"]
+# counting biological replicates
+SRA_RunTable[, c("biol_rep") := lapply(.SD, function(ds){seq(1, length(ds))}), .SDcols = "tech_rep", by = c("Developmental_Stage", "tech_rep")]
+# make sample name as combination of stage, biological rep and technical rep
+SRA_RunTable$sample <- paste0(gsub(" ", "_", SRA_RunTable$Developmental_Stage), ".", SRA_RunTable$biol_rep, ".", SRA_RunTable$tech_rep)
+# order stage
+SRA_RunTable$Developmental_Stage <- factor(SRA_RunTable$Developmental_Stage, levels = c("MII oocyte", "Zygote", "early 2-cell", "2-cell", "4-cell", "8-cell", "E3.5_ICM", "E4.0_ICM", "Inner cell mass", "Embryonic stem cell", "E5.5_Epi", "E6.5_Epi", "E6.5_VE", "E7.5_Ecto", "E7.5_PS", "E7.5_Meso", "E7.5_Endo", "E3.5_TE", "E5.5_VE"))
+setorder(SRA_RunTable, Developmental_Stage, biol_rep, tech_rep)
+rownames(SRA_RunTable) <- SRA_RunTable$sample # necessary to in case make dds
+
+```
+
+```{r creating tx2gene and geneID2name df}
+
+# Creating the transcriptID2geneID df; the transcriptID2geneID tsv file has been created with custom shell script tx2gene_from_encode_gtf.sh in src/sh folder
+tx2gene <- fread("../../data/annotations/gencode.vM25.annotation.tx2gene.tsv", col.names = c("tx_id", "gene_id"))
+# removing version
+tx2gene <- tx2gene[,  lapply(.SD, gsub, pattern = "\\..*", replacement = ""), .SDcols = names(tx2gene)]
+
+# Creating the geneID2geneName df; the geneID2geneName tsv file has been created with custom shell script geneID2name_from_encode_gtf.sh in src/sh folder
+geneID2name <- fread("../../data/annotations/gencode.vM25.annotation.geneID2name.tsv", col.names = c("gene_id", "gene_name"))
+# removing version
+geneID2name <- geneID2name[,  lapply(.SD, gsub, pattern = "\\..*", replacement = ""), .SDcols = names(geneID2name)]
+
+# Merging the 2 dfs
+gene_map_dt <- as.data.table(merge(geneID2name, tx2gene, by = "gene_id"))
+
+```
+
+```{r creating the txi object}
+
+# specifying the directory containing Salmon outputs
+dir <- "../../data/sequencing/Salmon"
+
+files <- sort(list.files(path = dir))
+
+# making the character vector of names of Salmon quantification's files
+files_w_path <- file.path(dir, files)
+
+# tximport without gene level summarization
+txi.tx <- tximport(files_w_path, type="salmon", txOut = TRUE)
+
+# renaming columns of txi matrices object
+colnames(txi.tx$counts) <- gsub("_.*", "", files)
+colnames(txi.tx$abundance) <- gsub("_.*", "", files)
+colnames(txi.tx$length) <- gsub("_.*", "", files)
+
+# ordering txi matrices as the samples in the SRA table
+txi.tx$counts <- txi.tx$counts[, SRA_RunTable$Run]
+txi.tx$abundance <- txi.tx$abundance[, SRA_RunTable$Run]
+txi.tx$length <- txi.tx$length[, SRA_RunTable$Run]
+
+```
+
+```{r working on txi matrices}
+
+# make dt from txi matrices, w explicit gene ids and names, tx ids and lengths
+make_dt_from_tximport_mx <- function (txi_mx, my_gene_map_dt = gene_map_dt, my_SRA_RunTable = SRA_RunTable) {
+  gene_anno <- rownames(txi_mx)
+  txi_dt <- data.table(txi_mx)
+  txi_dt$gene_id <- unlist(lapply(strsplit(gene_anno, "\\|"), function (split_row) {gsub("\\..*", "", split_row[2])}))
+  txi_dt$tx_id <- unlist(lapply(strsplit(gene_anno, "\\|"), function (split_row) {gsub("\\..*", "", split_row[1])}))
+  txi_dt$tx_length <- unlist(lapply(strsplit(gene_anno, "\\|"), function (split_row) {return(split_row[7])}))
+  # adding gene names
+  txi_dt <- merge(txi_dt, gene_map_dt, by = c("tx_id", "gene_id"))
+  # renaming columns
+  names(txi_dt)[which(colnames(txi_dt) %in% SRA_RunTable$Run)] <- SRA_RunTable$sample
+  return(txi_dt)
+}
+TPM_dt <- make_dt_from_tximport_mx(txi.tx$abundance)
+length_dt <- make_dt_from_tximport_mx(txi.tx$length)
+
+```
+
+```{r extracting Ogt and Oga isoforms}
+
+gene_TPM <- TPM_dt[gene_name %in% c("Ogt", "Oga")]
+gene_TPM_m <- melt(gene_TPM, id.vars = c("gene_name", "gene_id", "tx_id", "tx_length"), variable.name = "sample", value.name = "TPM")
+gene_TPM_m$TPM <- as.numeric(gene_TPM_m$TPM)
+# creating stage_biolRep variable from sample name
+gene_TPM_m$stage_rep <- gsub("\\.[1-9]$", "", gene_TPM_m$sample)
+# creating stage variable from sample name
+gene_TPM_m$stage <- gsub("\\.[1-9]$", "", gene_TPM_m$stage_rep)
+# reordering the stage for plotting
+gene_TPM_m$stage <- factor(gene_TPM_m$stage, levels = c("MII_oocyte", "Zygote", "early_2-cell", "2-cell", "4-cell", "8-cell", "E3.5_ICM", "Inner_cell_mass", "E4.0_ICM", "Embryonic_stem_cell", "E5.5_Epi", "E6.5_Epi", "E6.5_VE", "E7.5_Ecto", "E7.5_PS", "E7.5_Meso", "E7.5_Endo", "E3.5_TE", "E5.5_VE"))
+# averaging TPM for tech reps
+gene_TPM_m <- gene_TPM_m[, lapply(.SD, mean), .SDcols = "TPM", by = c("tx_id", "stage_rep", "gene_name", "stage")]
+# averaging TPM for biol rep
+gene_TPM_m[, c("TPM_mean") := list(mean(TPM)), by = c("tx_id", "stage", "gene_name")]
+
+# defining short and long isoforms of Ogt
+gene_TPM_m$tx_type[gene_TPM_m$gene_name == "Ogt"] <- "shorter_Nter_nonCoding"
+gene_TPM_m$tx_type[gene_TPM_m$tx_id %in% c("ENSMUST00000147635")] <- "shorter_Cter"
+gene_TPM_m$tx_type[gene_TPM_m$tx_id %in% c("ENSMUST00000044475", "ENSMUST00000119299")] <- "full_length"
+
+# defining main (Transcript Support Level 1) and shorter isoforms of Oga 
+gene_TPM_m$tx_type[gene_TPM_m$gene_name == "Oga"] <- "full_length"
+gene_TPM_m$tx_type[gene_TPM_m$tx_id %in% c("ENSMUST00000235865")] <- "shorter_Nter"
+gene_TPM_m$tx_type[gene_TPM_m$tx_id %in% c("ENSMUST00000235508", "ENSMUST00000236960")] <- "alternative_noExon11"
+gene_TPM_m$tx_type[gene_TPM_m$tx_id %in% c("ENSMUST00000235448", "ENSMUST00000235936")] <- "shorter_Cter"
+
+```
+
+# Ogt
+
+All transcript isoforms shown and biological replicates averaged:
+
+```{r isoforms line plot Ogt}
+
+my_gene = "Ogt"
+
+ggplot(data = gene_TPM_m[!(stage %in% c("E3.5_TE", "E5.5_VE", "Embryonic_stem_cell", "Inner_cell_mass")) & gene_TPM_m$gene_name == my_gene], aes(x = stage, y = TPM_mean)) +
+  geom_line(aes(color = tx_id, group = tx_id, linetype = tx_type)) +
+  geom_point() +
+  ylab("TPM") +
+  xlab("") +
+  scale_fill_brewer(palette = "Set2") +
+  theme(axis.text = element_text(size = 14), axis.title = element_text(size = 16),
+        title = element_text(size = 18),
+        legend.text = element_text(size = 14), legend.title = element_text(size = 16),
+        legend.key.height = unit(1.5,"line"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+In next plot:
+
+* Biological replicates are shown for each stage
+* TPM for all isoforms of the same transcript type are summed
+* shorter Cter is excluded because clearly not present at any stage by looking at the coverage tracks in IGV.
+
+```{r isoforms dotplot Ogt (FIGURE)}
+
+my_gene = "Ogt"
+# average TPM by tx type
+gene_TPM_m_byTxType <- gene_TPM_m[gene_TPM_m$gene_name == my_gene, lapply(.SD, sum), .SDcols = "TPM", by = c("tx_type", "stage_rep", "gene_name", "stage")]
+
+ggplot(data = gene_TPM_m_byTxType[!(stage %in% c("E3.5_TE", "E5.5_VE", "Embryonic_stem_cell", "Inner_cell_mass")) & !(tx_type %in% c("shorter_Cter"))], aes(x = stage, y = TPM)) +
+  geom_point(aes(color = tx_type)) +
+  ylab("TPM") +
+  xlab("") +
+  ylim(c(0,60)) +
+  scale_fill_brewer(palette = "Set2") +
+  theme(axis.text = element_text(size = 14), axis.title = element_text(size = 16),
+        title = element_text(size = 18),
+        legend.text = element_text(size = 14), legend.title = element_text(size = 16),
+        legend.key.height = unit(1.5,"line"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+
+# Oga 
+
+All transcript isoforms shown and biological replicates averaged:
+
+```{r isoforms line plots Oga}
+
+my_gene = "Oga"
+
+ggplot(data = gene_TPM_m[!(stage %in% c("E3.5_TE", "E5.5_VE", "Embryonic_stem_cell", "Inner_cell_mass")) & gene_TPM_m$gene_name == my_gene], aes(x = stage, y = TPM_mean)) +
+  geom_line(aes(color = tx_id, group = tx_id, linetype = tx_type)) +
+  geom_point() +
+  ylab("TPM") +
+  xlab("") +
+  scale_fill_brewer(palette = "Set2") +
+  theme(axis.text = element_text(size = 14), axis.title = element_text(size = 16),
+        title = element_text(size = 18),
+        legend.text = element_text(size = 14), legend.title = element_text(size = 16),
+        legend.key.height = unit(1.5,"line"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+In next plot:
+
+* Biological replicates are shown for each stage
+* TPM for all isoforms of the same transcript type are summed
+* shorter Cter and shorter Nter are excluded because clearly not present at any stage by looking at the coverage tracks in IGV.
+
+```{r isoforms dotplot Oga (FIGURE)}
+
+my_gene = "Oga"
+# average TPM by tx type
+gene_TPM_m_byTxType <- gene_TPM_m[gene_TPM_m$gene_name == my_gene, lapply(.SD, sum), .SDcols = "TPM", by = c("tx_type", "stage_rep", "gene_name", "stage")]
+
+ggplot(data = gene_TPM_m_byTxType[!(stage %in% c("E3.5_TE", "E5.5_VE", "Embryonic_stem_cell", "Inner_cell_mass")) & !(tx_type %in% c("shorter_Cter", "shorter_Nter"))], aes(x = stage, y = TPM)) +
+  geom_point(aes(color = tx_type)) +
+  ylab("TPM") +
+  xlab("") +
+  ylim(c(0,60)) +
+  scale_fill_brewer(palette = "Set2") +
+  theme(axis.text = element_text(size = 14), axis.title = element_text(size = 16),
+        title = element_text(size = 18),
+        legend.text = element_text(size = 14), legend.title = element_text(size = 16),
+        legend.key.height = unit(1.5,"line"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r sessioninfo, echo = TRUE, results = 'markup'}
+
+sessionInfo()
+
+```

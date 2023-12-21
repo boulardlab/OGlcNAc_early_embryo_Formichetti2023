@@ -1,0 +1,239 @@
+---
+title: "SMART-Seq2 mRNA-Seq of single E7 halves from embryos injected w active/dead-Btgh - DE analysis"
+date: "September 2nd, 2022"
+author: 
+- name: Sara Formichetti
+  affiliation: EMBL Rome
+  email: sara.formichetti@embl.it
+output:
+  prettydoc::html_pretty:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    fig_caption: yes
+---
+
+```{r Setting general options, include=FALSE}
+
+knitr::opts_chunk$set(autodep = TRUE, cache = TRUE, echo = FALSE, warning = FALSE, message = FALSE, results = 'hide', fig.width=12, fig.height=8)
+
+```
+
+```{r loading needed packages}
+
+library(ggplot2)
+library(reshape2)
+library(data.table)
+library("DESeq2")
+library(ggpubr)
+library(gridExtra)
+library(pheatmap)
+library(ggrepel)
+library(vsn)
+library(dplyr)
+
+```
+
+```{r function to retrieve gene names res DESeq2}
+
+retrieve_res_names <- function (r) {
+  res_df <- data.frame(gene_id = rownames(r))
+  res_df <- merge(res_df, unique(gene_map_dt[, .(gene_name, gene_id)]), all.x = TRUE, by = "gene_id")
+  res_df$gene_name[is.na(res_df$gene_name)] <- res_df$gene_id[is.na(res_df$gene_name)]
+  return(res_df)
+}
+
+```
+
+```{r function to customize plots DESeq2}
+
+pval_hist <- function (dds_res) {
+  ggplot(as(dds_res, "data.frame"), aes(x = pvalue)) +
+  geom_histogram(binwidth = 0.01, fill = "Royalblue", boundary = 0) +
+  ggtitle(gsub(" vs ", "\nvs ", gsub("(.*condition )|(.*: )", "", mcols(dds_res)$description[4]))) +
+  scale_x_continuous(breaks=c(0.0, 0.5, 1)) +
+  theme(axis.text = element_text(size = 20), axis.title = element_text(size = 20),
+        title = element_text(size = 18),
+        legend.text = element_text(size = 20), legend.title = element_text(size = 20),
+        legend.key.height = unit(1.5,"line"))
+}
+
+MA_plot <- function(dds_res, adjpval, ylims) {
+  DESeq2::plotMA(dds_res, alpha = adjpval, main = gsub("(.*condition )|(.*: )", "", mcols(dds_res)$description[4]), cex.lab = 2, cex.axis = 2, cex.main = 2, ylim = ylims)
+}
+
+custom_MA_plot <- function(my_dds_res, adjpval_to_color, l2fc_to_label, baseMean_to_label, ylim, xmin) {
+  # adding label to genes which are significant and expressed above defined thresholds - labels are gene names
+  my_res_names_df <- retrieve_res_names(my_dds_res)
+  my_dds_res$to_label <- ""
+  my_dds_res$to_label[!is.na(my_dds_res$padj) & my_dds_res$baseMean >= baseMean_to_label & my_dds_res$padj < adjpval_to_color & (my_dds_res$log2FoldChange >= l2fc_to_label | my_dds_res$log2FoldChange <= -l2fc_to_label)] <- my_res_names_df$gene_name[!is.na(my_dds_res$padj) & my_dds_res$baseMean >= baseMean_to_label & my_dds_res$padj < adjpval_to_color & (my_dds_res$log2FoldChange >= l2fc_to_label | my_dds_res$log2FoldChange <= -l2fc_to_label)]
+  # adding label to genes which are significant and expressed above defined thresholds
+  my_dds_res$to_color <- ""
+  my_dds_res$to_color[my_dds_res$padj < adjpval_to_color] <- paste0("adjpval < ", adjpval_to_color)
+  dt_to_plot <- as.data.table(my_dds_res)
+  ggplot(dt_to_plot, aes(x = baseMean, y = log2FoldChange)) +
+    geom_point(aes(color = to_color), alpha = 0.8) +
+    geom_text_repel(aes(label = to_label), size = 4, max.overlaps = 100) +
+    scale_x_log10(limits=c(xmin, max(my_dds_res$baseMean))) +
+    ylim(ylim) +
+    scale_color_manual(values = c("grey", "blue")) +
+    ggtitle(gsub("(.*condition )|(.*: )", "", mcols(my_dds_res)$description[4])) +
+    theme(axis.text = element_text(size = 20), axis.title = element_text(size = 20), 
+          title = element_text(size = 20),
+          legend.position = "none",
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(),
+          axis.line = element_line(colour = "black"),
+          panel.border = element_rect(colour = "black", fill=NA))
+}
+
+```
+
+```{r functions to order DESeq results}
+
+# Function which takes a DESeq results object and return it as a dataframe, with genes ordered by pvalue and with gene names added; furthermore it writes this dataframe to a file if desired
+pvalue_ranked_DE <- function (my_res, my_DE_dir, writeToFile, my_adjpval, my_gene_name_mapping_table) {
+  # getting name of contrast
+  contrast_name <- gsub(" ", "_", gsub(".*condition ", "", my_res@elementMetadata$description[4]))
+  # removing genes for which padj is NA
+  my_res <- my_res[!(is.na(my_res$padj)), ]
+  # merging the dataframe with the gene names
+  my_res$gene_id <- row.names(my_res)
+  my_res <- merge(as.data.frame(my_res), my_gene_name_mapping_table, by = "gene_id", all.x = TRUE)
+  # ordering by pvalue
+  my_res_ord <- my_res[order(my_res$pvalue),]
+  # keeping only the ones with padj below desired threshold
+  my_res_ord_f <- my_res_ord[my_res_ord$padj < my_adjpval, ]
+  # writing them to file
+  if (writeToFile) {
+    # creating output directory if it does not exist
+    system(paste0("[ -d ", my_DE_dir, " ] || mkdir -p ", my_DE_dir))
+    write.csv(my_res_ord_f, file=paste0(my_DE_dir, contrast_name, "_DEG_by_pvalue.csv"))
+  }
+  return(my_res_ord_f)
+}
+
+```
+
+```{r loading R objs}
+
+load("Rdata/gene_map_dt.Rdata")
+load("Rdata/geneID2name_w_ex.Rdata")
+load("Rdata/design_df.Rdata")
+load("Rdata/counts_table.Rdata")
+load("Rdata/design_df_EPI.Rdata")
+load("Rdata/counts_table_EPI.Rdata")
+load("Rdata/design_df_TROPHO.Rdata")
+load("Rdata/counts_table_TROPHO.Rdata")
+
+```
+
+```{r adj pvalue cutoff}
+
+adjpvalue_cutoff <- 0.05
+
+```
+
+```{r DE dir}
+
+# Defining general export directory
+DE_dir <- "/home/sara/PhD/sequencing_projects/Btgh_injected_E7_SMARTSeq/analysis/DESeq/"
+
+```
+
+# DESeq2
+
+I compute Diff Expr Analysis with DESeq2, separately for each tissue (EPI and TROPHO).
+
+```{r DESeq}
+
+DESeq_pipeline_condition <- function (my_counts_table, my_design_df) {
+  my_dds <- DESeqDataSetFromMatrix(countData = my_counts_table,
+                              colData = my_design_df,
+                              design = ~ condition)
+  keep <- rowSums(counts(my_dds)) >= 10
+  my_dds <- my_dds[keep,]
+  my_dds <- DESeq(my_dds)
+  return(my_dds)
+}
+
+dds_EPI_cond <- DESeq_pipeline_condition(counts_table_EPI, design_df_EPI)
+dds_TROPHO_cond <- DESeq_pipeline_condition(counts_table_TROPHO, design_df_TROPHO)
+
+```
+
+```{r DESeq results}
+
+res_cond_EPI <- lfcShrink(dds_EPI_cond, contrast=c("condition","active_Btgh","dead_Btgh"), alpha=adjpvalue_cutoff, type="ashr")
+res_cond_TROPHO <- lfcShrink(dds_TROPHO_cond, contrast=c("condition","active_Btgh","dead_Btgh"), alpha=adjpvalue_cutoff, type="ashr")
+
+```
+
+## MA-plots
+
+The threshold used for a dot to be colored in red in the MA-plots is: p-value adjusted < `r adjpvalue_cutoff`.
+
+### EPIBLAST
+
+```{r pvalue histograms and MA-plots EPI, include = TRUE}
+
+baseMean_cutoff_to_label <- 10
+
+pval_hist(res_cond_EPI)
+MA_plot(res_cond_EPI, adjpval = adjpvalue_cutoff, ylims = c(-10,10))
+
+```
+
+Figure:
+
+```{r MA-plots EPI (FIGURE), include = TRUE}
+
+custom_MA_plot(res_cond_EPI, adjpval_to_color = adjpvalue_cutoff, l2fc_to_label = 0.1, baseMean_to_label = baseMean_cutoff_to_label, ylim = c(-3,3), xmin = 10)
+
+```
+
+### TROPHOBLAST
+
+```{r pvalue histograms and MA-plots TROPHO, include = TRUE}
+
+baseMean_cutoff_to_label <- 10
+
+pval_hist(res_cond_TROPHO)
+MA_plot(res_cond_TROPHO, adjpval = adjpvalue_cutoff, ylims = c(-10,10))
+
+```
+
+Figure:
+
+```{r MA-plots TROPHO (FIGURE), include = TRUE}
+
+custom_MA_plot(res_cond_TROPHO, adjpval_to_color = adjpvalue_cutoff, l2fc_to_label = 0.1, baseMean_to_label = baseMean_cutoff_to_label, ylim = c(-3,3), xmin = 10)
+
+```
+
+```{r ordering an exporting DE genes}
+
+DE_cond_EPI <- pvalue_ranked_DE(res_cond_EPI, my_DE_dir = paste0(DE_dir, "EPI/"), writeToFile = TRUE, my_adjpval = adjpvalue_cutoff, my_gene_name_mapping_table = geneID2name_w_ex)
+
+DE_cond_TROPHO <- pvalue_ranked_DE(res_cond_TROPHO, my_DE_dir = paste0(DE_dir, "TROPHO/"), writeToFile = TRUE, my_adjpval = adjpvalue_cutoff, my_gene_name_mapping_table = geneID2name_w_ex)
+
+```
+
+I export the DE genes with `r adjpvalue_cutoff`, ordered by pvalue, to `r DE_dir`. 
+
+```{r saving Rdata}
+
+save(dds_EPI_cond, file = "Rdata/dds_EPI_cond.Rdata")
+save(dds_TROPHO_cond, file = "Rdata/dds_TROPHO_cond.Rdata")
+save(res_cond_EPI, file = "Rdata/res_cond_EPI.Rdata")
+save(res_cond_TROPHO, file = "Rdata/res_cond_TROPHO.Rdata")
+
+
+```
+
+```{r sessioninfo, echo = TRUE, results = 'markup'}
+
+sessionInfo()
+
+```

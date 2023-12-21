@@ -1,0 +1,347 @@
+---
+title: "Conine data to define strictly-EGA and strictly-maternal genes"
+date: '2022-06-15'
+author: 
+- name: Sara Formichetti
+  affiliation: EMBL Rome
+  email: sara.formichetti@embl.it
+output:
+  prettydoc::html_pretty:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    fig_caption: yes
+---
+
+```{r Setting general options, include=FALSE}
+
+knitr::opts_chunk$set(autodep = TRUE, cache = TRUE, echo = FALSE, warning = FALSE, message = FALSE, results = 'hide', fig.width=12, fig.height=8)
+
+```
+
+```{r loading needed packages}
+
+library(ggplot2)
+library(reshape2)
+library(data.table)
+library("DESeq2")
+library(ggpubr)
+library(gridExtra)
+library(pheatmap)
+library(ggrepel)
+library(vsn)
+library(dplyr)
+library(edgeR)
+
+```
+
+```{r creating tx2gene and geneID2name df}
+
+# Creating the transcriptID2geneID df; the transcriptID2geneID tsv file has been created with custom shell script tx2gene_from_encode_gtf.sh in src/sh folder
+tx2gene <- fread("../../data/annotations/gencode.vM25.annotation.tx2gene.tsv", col.names = c("tx_id", "gene_id"))
+# removing version
+tx2gene <- tx2gene[,  lapply(.SD, gsub, pattern = "\\..*", replacement = ""), .SDcols = names(tx2gene)]
+# Adding to the tx2gene DataFrame the transcript-gene pairs corresponding to the Btgh construct
+tg_tx2gene <- DataFrame(tx_id = paste0(c("NLS_EGFP_activeBtgh_NLS", "NLS_EGFP_deadBtgh_NLS"), "_transcript"), gene_id = paste0(c("NLS_EGFP_activeBtgh_NLS", "NLS_EGFP_deadBtgh_NLS"), "_gene"))
+tx2gene_w_ex <- rbind(tx2gene, tg_tx2gene)
+
+# Creating the geneID2geneName df; the geneID2geneName tsv file has been created with custom shell script geneID2name_from_encode_gtf.sh in src/sh folder
+geneID2name <- fread("../../data/annotations/gencode.vM25.annotation.geneID2name.tsv", col.names = c("gene_id", "gene_name"))
+# removing version
+geneID2name <- geneID2name[,  lapply(.SD, gsub, pattern = "\\..*", replacement = ""), .SDcols = names(geneID2name)]
+# Adding the transgenes
+tg_geneID2name <- DataFrame(gene_id = paste0(c("NLS_EGFP_activeBtgh_NLS", "NLS_EGFP_deadBtgh_NLS"), "_gene"), gene_name = paste0(c("NLS_EGFP_activeBtgh_NLS", "NLS_EGFP_deadBtgh_NLS"), "_gene"))
+geneID2name_w_ex <- rbind(geneID2name, tg_geneID2name)
+
+# Merging the 2 dfs
+gene_map_dt <- as.data.table(merge(geneID2name_w_ex, tx2gene_w_ex, by = "gene_id"))
+
+```
+
+```{r function to customize plots DESeq2}
+
+pval_hist <- function (dds_res) {
+  ggplot(as(dds_res, "data.frame"), aes(x = pvalue)) +
+  geom_histogram(binwidth = 0.01, fill = "Royalblue", boundary = 0) +
+  ggtitle(gsub(" vs ", "\nvs ", gsub("(.*time_point )|(.*: )", "", mcols(dds_res)$description[4]))) +
+  scale_x_continuous(breaks=c(0.0, 0.5, 1)) +
+  theme(axis.text = element_text(size = 20), axis.title = element_text(size = 20),
+        title = element_text(size = 18),
+        legend.text = element_text(size = 20), legend.title = element_text(size = 20),
+        legend.key.height = unit(1.5,"line"))
+}
+
+MA_plot <- function(dds_res, adjpval, ylims) {
+  DESeq2::plotMA(dds_res, alpha = adjpval, main = gsub("(.*time_point )|(.*: )", "", mcols(dds_res)$description[4]), cex.lab = 2, cex.axis = 2, cex.main = 2, ylim = ylims)
+}
+
+```
+
+```{r function to order and export DESeq results}
+
+# Function which takes a DESeq results object and return it as a dataframe, with genes ordered by pvalue, filtered by adjpval and with gene names added; furthermore it writes this dataframe to a file if desired
+pvalue_ranked_DE <- function (my_res, my_DE_dir, writeToFile, my_adjpval, my_gene_name_mapping_table) {
+  # getting name of contrast
+  contrast_name <- gsub(" ", "_", gsub(".*time_point ", "", my_res@elementMetadata$description[4]))
+  # removing genes for which padj is NA
+  my_res <- my_res[!(is.na(my_res$padj)), ]
+  # merging the dataframe with the gene names
+  my_res$gene_id <- row.names(my_res)
+  my_res <- merge(as.data.frame(my_res), my_gene_name_mapping_table, by = "gene_id", all.x = TRUE)
+  # ordering by pvalue
+  my_res_ord <- my_res[order(my_res$pvalue),]
+  # keeping only the ones with padj below desired threshold
+  my_res_ord_f <- my_res_ord[my_res_ord$padj < my_adjpval, ]
+  # writing them to file
+  if (writeToFile) {
+    # creating output directory if it does not exist
+    system(paste0("[ -d ", my_DE_dir, " ] || mkdir -p ", my_DE_dir))
+    write.csv(my_res_ord_f, file=paste0(my_DE_dir, contrast_name, "_DEG_by_pvalue.csv"))
+  }
+  return(my_res_ord_f)
+}
+
+```
+
+# Samples' metadata
+
+Reference paper: [Conine et al., 2018](https://www.sciencedirect.com/science/article/pii/S1534580718305410?via%3Dihub).
+
+```{r files path}
+
+# directory containing featureCounts outputs
+dir <- "../../data/sequencing/Conine/featureCounts/STAR_default"
+# vector of file names
+files <- grep("_counts", sort(list.files(path = dir)), value = TRUE)
+# adding the path
+files_w_path <- file.path(dir, files)
+
+```
+
+```{r reading samples metadata}
+
+# reading SRA runtable
+SRT <- fread("../../data/sequencing/Conine/SraRunTable_GSE111864.txt")
+# selecting only cauda 2c preEGA (18h) and postEGA (28h)
+SRT_EGA <- SRT[source_name %in% c("cauda18", "cauda28")]
+
+```
+
+```{r EGA runtable, results='asis'}
+
+knitr::kable(SRT_EGA, row.names = FALSE)
+
+```
+
+```{r reading counts}
+
+# reading and merging all files in one data.frame by Geneid
+counts_table <- as.data.frame(Reduce(function(...) merge(..., by = c("Geneid")), lapply(files_w_path, function (f) {fread(f)})))
+# simplifying colnames by leaving only the sample name
+colnames(counts_table) <- gsub(".fastq", "", names(counts_table))
+# adding gene ids as rownames
+rownames(counts_table) <- counts_table$Geneid
+counts_table$Geneid <- NULL
+# removing version from gene ids
+rownames(counts_table) <- gsub("\\..*", "", rownames(counts_table))
+# removing samples in runtable which are not present among count files
+SRT_EGA <- SRT_EGA[SRT_EGA$Experiment %in% names(counts_table)]
+# reordering samples in runtable based on time point
+SRT_EGA <- SRT_EGA[order(SRT_EGA$source_name)]
+# reordering counts table based on sample order in runtable
+counts_table <- counts_table[, SRT_EGA$Experiment]
+
+```
+
+```{r building design df}
+
+design_df <- data.frame(sample = SRT_EGA$Experiment, time_point = SRT_EGA$source_name)
+rownames(design_df) <- design_df$sample
+
+```
+
+```{r building dds}
+
+Conine_dds <- DESeqDataSetFromMatrix(countData = counts_table,
+                              colData = design_df,
+                              design = ~ time_point)
+keep <- rowSums(counts(Conine_dds)) >= 15
+Conine_dds <- Conine_dds[keep,]
+Conine_dds <- DESeq(Conine_dds)
+
+```
+
+# Heatmap for quality assessment
+
+After applying the log2(n + 1) transformation, I plot heatmap of normalized counts for top highly expressed genes to check for eventual big sample heterogeneity present in the dataset. 
+
+```{r pheatmap after different transformations, include = TRUE}
+
+highest_expr_hm <- function (my_dds, my_title) {
+  select <- order(rowMeans(counts(my_dds, normalized = FALSE)), decreasing = TRUE)[1:30]
+  design_df_h <- as.data.frame(colData(my_dds)[,c("time_point", "sample")])
+  design_df_h$sample <- NULL
+  my_ntd <- normTransform(my_dds)
+  pheatmap(assay(my_ntd)[select,], cluster_rows = FALSE, show_rownames = TRUE, show_colnames = TRUE,
+         cluster_cols = TRUE, annotation_col = design_df_h, main = my_title)
+}
+
+highest_expr_hm(Conine_dds, my_title = "")
+
+```
+
+Sample SRX3794606 is an outlier of the 28h time point.
+
+# Finding Differentially Expressed Genes
+
+## DESeq2
+
+```{r adj pvalue cutoff}
+
+adjpvalue_cutoff <- 0.05
+
+```
+
+```{r DE dir}
+
+# Defining general export directory
+DE_dir <- "../../analysis/Conine/"
+
+```
+
+```{r DESeq results}
+
+# getting DESeq results w shrunken lo2FC
+DESeq_res <- lfcShrink(Conine_dds, coef="time_point_cauda28_vs_cauda18", alpha=adjpvalue_cutoff, type="ashr")
+# keeping only significant genes, ordered by pval
+DESeq_res_f <- pvalue_ranked_DE(DESeq_res[DESeq_res$baseMean > 10 & abs(DESeq_res$log2FoldChange) > 1,], my_DE_dir = paste0(DE_dir, "DESeq/"), writeToFile = TRUE, my_adjpval = adjpvalue_cutoff, my_gene_name_mapping_table = geneID2name_w_ex)
+# defining mat genes as genes which decrease from pre to postEGA and viceversa for embryonic genes
+DESeq_res_f_mat <- DESeq_res_f[DESeq_res_f$log2FoldChange < 0, ]
+DESeq_res_f_embr <- DESeq_res_f[DESeq_res_f$log2FoldChange > 0, ]
+
+```
+
+```{r MA plot DESeq results, include = TRUE}
+
+MA_plot(DESeq_res, adjpval = adjpvalue_cutoff, ylims = c(-10,10))
+
+```
+
+## Wilcoxon test, after edgeR normalization
+
+I proceed as advised in [Li et al. Genome Biology 2022](https://genomebiology.biomedcentral.com/articles/10.1186/s13059-022-02648-4#Sec4) for big datasets (e.g. num samples ~ 100):
+
+1. edgeR normalization
+2. Wilcoxon non parametric statistical test.
+
+```{r edgeR DGEL}
+
+edgeR_DGEL <- DGEList(counts = counts_table, group = design_df$time_point)
+
+```
+
+```{r edgeR filtering and normalization}
+
+# Remove rows which consistently have zero or very low counts
+keep <- filterByExpr(edgeR_DGEL, min.total.count = 15, min.count = 10)
+edgeR_DGEL <- edgeR_DGEL[keep, keep.lib.sizes=FALSE]
+# Perform TMM normalization and transfer to CPM (Counts Per Million)
+edgeR_DGEL <- calcNormFactors(edgeR_DGEL, method="TMM")
+counts_edgeR_norm <- cpm(edgeR_DGEL)
+counts_edgeR_norm <- as.data.frame(counts_edgeR_norm)
+
+```
+
+```{r wilcoxon after edgeR norm}
+
+w_edgeR_pvalues <- sapply(1:nrow(counts_edgeR_norm),function(i) {
+     data <- cbind.data.frame(gene = as.numeric(t(counts_edgeR_norm[i,])), groups=design_df$time_point)
+     p = suppressWarnings(wilcox.test(gene~groups, data))$p.value
+     return(p)
+   })
+w_edgeR_fdr <- p.adjust(w_edgeR_pvalues, method = "fdr")
+
+```
+
+```{r edgeR log2FC}
+
+groupsLevel <- levels(as.factor(design_df$time_point))
+dataCon1 <- counts_edgeR_norm[,c(which(design_df$time_point==groupsLevel[1]))]
+dataCon2 <- counts_edgeR_norm[,c(which(design_df$time_point==groupsLevel[2]))]
+edgeR_foldChanges <- log2(rowMeans(dataCon2)/rowMeans(dataCon1))
+
+```
+
+```{r edgeR filtered res}
+
+edgeR_w_res <- data.frame(gene_id = names(edgeR_foldChanges), log2FoldChange = edgeR_foldChanges, pvalue = w_edgeR_pvalues, FDR = w_edgeR_fdr)
+rownames(edgeR_w_res) = rownames(counts_edgeR_norm)
+edgeR_w_res <- na.omit(edgeR_w_res)
+edgeR_w_res <- merge(edgeR_w_res, geneID2name_w_ex, by = "gene_id", all.x = TRUE)
+edgeR_w_res <- edgeR_w_res[order(edgeR_w_res$pvalue), ]
+edgeR_w_res_f <- edgeR_w_res[edgeR_w_res$FDR < adjpvalue_cutoff & abs(edgeR_w_res$log2FoldChange) > 1,]
+write.csv(edgeR_w_res_f, file=paste0(DE_dir, "wilc_edgeR/DEG_by_pvalue.csv"))
+
+edgeR_w_res_f_mat <- edgeR_w_res_f[edgeR_w_res_f$log2FoldChange < 0, ]
+edgeR_w_res_f_embr <- edgeR_w_res_f[edgeR_w_res_f$log2FoldChange > 0, ]
+
+```
+
+## Comparing the 2 methods with EGA genes
+
+* EGA genes are from [Li et al. Nature 2018](https://www.nature.com/articles/s41586-018-0751-5#additional-information) and defined as RPKM oocyte < 0.5 and RPKM 2c > 2
+* "DESeq embr" and "edgeR wilcoxo embr" genes are DEGs found with the two methods with log2FC > 1 between the 18h and the 28h 2c
+* "DESeq mat" and "edgeR wilcoxo mat" genes are DEGs found with the two methods with log2FC < -1 between the 18h and the 28h 2c
+
+```{r loading EGA genes}
+
+library(readxl)
+EGA_df <- read_excel("../../doc/41586_2018_751_MOESM3_ESM.xlsx", sheet = 2)
+# adding the gene id
+EGA_df <- merge(EGA_df, geneID2name_w_ex, by.x = "gene", by.y = "gene_name")
+
+```
+
+```{r intersect DESeq or edgeR wilcoxon DEGs w EGA genes, include = TRUE}
+
+library(gplots)
+
+embr_venn <- venn(list(`DESeq DEGs embr` = DESeq_res_f_embr$gene_id, `EGA_genes` = EGA_df$gene_id, `edgeR wilcoxon DEGs embr` = edgeR_w_res_f_embr$gene_id), show.plot=TRUE)
+venn(list(`DESeq DEGs mat` = DESeq_res_f_mat$gene_id, `EGA_genes` = EGA_df$gene_id, `edgeR wilcoxon DEGs mat` = edgeR_w_res_f_mat$gene_id), show.plot=TRUE)
+
+venn(list(`edgeR wilcoxon DEGs embr` = edgeR_w_res_f_embr$gene_id, `DESeq DEGs embr` = DESeq_res_f_embr$gene_id), show.plot=TRUE)
+
+```
+
+Conclusion: DESeq does find more genes than Wilcoxon test after edgeR, but some of these additional genes are overlapping with EGA genes. 
+
+# Defining strictly-EGA and strictly-maternal transcripts
+
+I define:
+
+* strictly EGA genes as the intersection between the DESeq embr DEGs, the wilcoxon embr DEGs and the EGA list of genes from Zhang et al.
+* strictly maternal genes as the intersection between DESeq mat DEGs and wilcoxon mat DEGs. 
+
+```{r defining strictly EGA and strictly embr genes}
+
+strictly_EGA_DESeq_res <- DESeq_res_f[DESeq_res_f$gene_id %in% attr(embr_venn, "intersections")[[6]], ]
+strictly_mat_DESeq_res <- merge(DESeq_res_f_mat, edgeR_w_res_f_mat, by = "gene_id", suffixes = c(".DESeq", ".edgeR_wilc"))
+
+write.csv(strictly_EGA_DESeq_res, file=paste0(DE_dir, "strictly_EGA_DEseq_res.csv"))
+write.csv(strictly_mat_DESeq_res, file=paste0(DE_dir, "strictly_mat_DEseq_edgeRwilc_res.csv"))
+
+```
+
+```{r saving some Rdata files, setup}
+
+save(strictly_EGA_DESeq_res, file = "Rdata/strictly_EGA_DESeq_res.Rdata")
+save(strictly_mat_DESeq_res, file = "Rdata/strictly_mat_DESeq_res.Rdata")
+save(Conine_dds, file = "Rdata/Conine_dds.Rdata")
+
+```
+
+```{r sessioninfo, echo = TRUE, results = 'markup'}
+
+sessionInfo()
+
+```

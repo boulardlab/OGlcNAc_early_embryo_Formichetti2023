@@ -1,0 +1,207 @@
+---
+title: "SMART-Seq2 mRNA-Seq of morulae injected and nonInjected w active/dead-Btgh - DE analysis"
+date: "June 13th, 2022"
+author: 
+- name: Sara Formichetti
+  affiliation: EMBL Rome
+  email: sara.formichetti@embl.it
+output:
+  prettydoc::html_pretty:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    fig_caption: yes
+---
+
+```{r Setting general options, include=FALSE}
+
+knitr::opts_chunk$set(autodep = TRUE, cache = TRUE, echo = FALSE, warning = FALSE, message = FALSE, results = 'hide', fig.width=12, fig.height=8)
+
+```
+
+```{r loading needed packages}
+
+library(ggplot2)
+library(reshape2)
+library(data.table)
+library("DESeq2")
+library(ggpubr)
+library(gridExtra)
+library(pheatmap)
+library(ggrepel)
+library(vsn)
+library(RUVSeq)
+library(dplyr)
+
+```
+
+```{r function to retrieve gene names res DESeq2}
+
+retrieve_res_names <- function (r) {
+  res_df <- data.frame(gene_id = rownames(r))
+  res_df <- merge(res_df, unique(gene_map_dt[, .(gene_name, gene_id)]), all.x = TRUE, by = "gene_id")
+  res_df$gene_name[is.na(res_df$gene_name)] <- res_df$gene_id[is.na(res_df$gene_name)]
+  return(res_df)
+}
+
+```
+
+```{r function to customize plots DESeq2}
+
+pval_hist <- function (dds_res) {
+  ggplot(as(dds_res, "data.frame"), aes(x = pvalue)) +
+  geom_histogram(binwidth = 0.01, fill = "Royalblue", boundary = 0) +
+  ggtitle(gsub(" vs ", "\nvs ", gsub("(.*condition )|(.*: )", "", mcols(dds_res)$description[4]))) +
+  scale_x_continuous(breaks=c(0.0, 0.5, 1)) +
+  theme(axis.text = element_text(size = 20), axis.title = element_text(size = 20),
+        title = element_text(size = 18),
+        legend.text = element_text(size = 20), legend.title = element_text(size = 20),
+        legend.key.height = unit(1.5,"line"))
+}
+
+MA_plot <- function(dds_res, adjpval, ylims) {
+  DESeq2::plotMA(dds_res, alpha = adjpval, main = gsub("(.*condition )|(.*: )", "", mcols(dds_res)$description[4]), cex.lab = 2, cex.axis = 2, cex.main = 2, ylim = ylims)
+}
+
+```
+
+```{r functions to get and order DESeq results}
+
+get_results_all_comp <- function (my_dds) {
+  res_list <- list(
+    active_vs_dead = lfcShrink(my_dds, contrast=c("condition","active_Btgh","dead_Btgh"), alpha=adjpvalue_cutoff, type="ashr"),
+    active_vs_ctrl = lfcShrink(my_dds, contrast=c("condition","active_Btgh","non_injected"), alpha=adjpvalue_cutoff, type="ashr"),
+    dead_vs_ctrl = lfcShrink(my_dds, contrast=c("condition","dead_Btgh","non_injected"), alpha=adjpvalue_cutoff, type="ashr"))
+  return(res_list)
+}
+
+# Function which takes a DESeq results object and return it as a dataframe, with genes ordered by pvalue and with gene names added; furthermore it writes this dataframe to a file if desired
+pvalue_ranked_DE <- function (my_res, my_DE_dir, writeToFile, my_adjpval, my_gene_name_mapping_table) {
+  # getting name of contrast
+  contrast_name <- gsub(" ", "_", gsub(".*condition ", "", my_res@elementMetadata$description[4]))
+  # removing genes for which padj is NA
+  my_res <- my_res[!(is.na(my_res$padj)), ]
+  # merging the dataframe with the gene names
+  my_res$gene_id <- row.names(my_res)
+  my_res <- merge(as.data.frame(my_res), my_gene_name_mapping_table, by = "gene_id", all.x = TRUE)
+  # ordering by pvalue
+  my_res_ord <- my_res[order(my_res$pvalue),]
+  # keeping only the ones with padj below desired threshold
+  my_res_ord_f <- my_res_ord[my_res_ord$padj < my_adjpval, ]
+  # writing them to file
+  if (writeToFile) {
+    # creating output directory if it does not exist
+    system(paste0("[ -d ", my_DE_dir, " ] || mkdir -p ", my_DE_dir))
+    write.csv(my_res_ord_f, file=paste0(my_DE_dir, contrast_name, "_DEG_by_pvalue.csv"))
+  }
+  return(my_res_ord_f)
+}
+
+```
+
+```{r loading R objs}
+
+load("Rdata/design_df.Rdata")
+load("Rdata/gene_map_dt.Rdata")
+load("Rdata/geneID2name_w_ex.Rdata")
+load("Rdata/counts_table.Rdata")
+
+```
+
+```{r adj pvalue cutoff}
+
+adjpvalue_cutoff <- 0.05
+
+```
+
+```{r DE dir}
+
+# Defining general export directory
+DE_dir <- "../../analysis/DESeq/"
+
+```
+
+# DESeq2
+
+```{r DESeq, echo = TRUE}
+
+dds <- DESeqDataSetFromMatrix(countData = counts_table,
+                              colData = design_df,
+                              design = ~ condition)
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+dds <- DESeq(dds)
+
+```
+
+```{r DESeq results}
+
+res_all <- get_results_all_comp(dds)
+
+```
+
+## MA-plots
+
+The threshold used for a dot to be coloured in blue in the MA-plots is: p-value adjusted < `r adjpvalue_cutoff`.
+
+```{r pvalue histograms and MA-plots, include = TRUE}
+
+do.call(grid.arrange, lapply(res_all, pval_hist))
+lapply(res_all, MA_plot, adjpval = adjpvalue_cutoff, ylims = c(-10,10))
+
+```
+
+### FIGURE
+
+```{r MA-plots (FIGURE), include = TRUE}
+
+custom_MA_plot <- function(my_dds_res, adjpval_to_color, l2fc_to_label, baseMean_to_label, ylim, xmin) {
+  # adding label to genes which are significant and expressed above defined thresholds - labels are gene names
+  my_res_names_df <- retrieve_res_names(my_dds_res)
+  my_dds_res$to_label <- ""
+  my_dds_res$to_label[!is.na(my_dds_res$padj) & my_dds_res$baseMean >= baseMean_to_label & my_dds_res$padj < adjpval_to_color & (my_dds_res$log2FoldChange >= l2fc_to_label | my_dds_res$log2FoldChange <= -l2fc_to_label)] <- my_res_names_df$gene_name[!is.na(my_dds_res$padj) & my_dds_res$baseMean >= baseMean_to_label & my_dds_res$padj < adjpval_to_color & (my_dds_res$log2FoldChange >= l2fc_to_label | my_dds_res$log2FoldChange <= -l2fc_to_label)]
+  # adding label to genes which are significant and expressed above defined thresholds
+  my_dds_res$to_color <- ""
+  my_dds_res$to_color[my_dds_res$padj < adjpval_to_color] <- paste0("adjpval < ", adjpval_to_color)
+  dt_to_plot <- as.data.table(my_dds_res)
+  ggplot(dt_to_plot, aes(x = baseMean, y = log2FoldChange)) +
+    geom_point(aes(color = to_color), alpha = 0.8) +
+    geom_text_repel(aes(label = to_label), size = 3, max.overlaps = 30) +
+    ylim(ylim) +
+    scale_x_log10(limits=c(xmin, max(my_dds_res$baseMean))) +
+    scale_color_manual(values = c("grey", "blue")) +
+    ggtitle(gsub("(.*condition )|(.*: )", "", mcols(my_dds_res)$description[4])) +
+    theme(axis.text = element_text(size = 18), axis.title = element_text(size = 18), 
+          title = element_text(size = 18),
+          legend.position = "none",
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(),
+          axis.line = element_line(colour = "black"),
+          panel.border = element_rect(colour = "black", fill=NA))
+}
+
+lapply(res_all, custom_MA_plot, adjpval_to_color = adjpvalue_cutoff, ylim = c(-2.5,2.5), xmin = 10, l2fc_to_label = 0.2, baseMean_to_label = 20)
+
+```
+
+```{r ordering and exporting DE genes}
+
+DE_list_all <- lapply(res_all, pvalue_ranked_DE, my_DE_dir = DE_dir, writeToFile = TRUE, my_adjpval = adjpvalue_cutoff, my_gene_name_mapping_table = geneID2name_w_ex)
+
+```
+
+```{r saving Rdata}
+
+save(res_all, file = "Rdata/res_all.Rdata")
+save(gene_map_dt, file = "Rdata/gene_map_dt.Rdata")
+save(counts_table, file = "Rdata/counts_table.Rdata")
+save(design_df, file = "Rdata/design_df.Rdata")
+
+```
+
+```{r sessioninfo, echo = TRUE, results = 'markup'}
+
+sessionInfo()
+
+```

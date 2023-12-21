@@ -1,0 +1,227 @@
+---
+title: "PCA of all preimplantation embryos non-injected or injected with active/deadBtgh"
+date: "February 28th, 2022"
+author: 
+- name: Sara Formichetti
+  affiliation: EMBL Rome
+  email: sara.formichetti@embl.it
+output: html_document
+---
+
+```{r Setting general options, include=FALSE}
+
+knitr::opts_chunk$set(autodep = TRUE, cache = TRUE, echo = FALSE, warning = FALSE, message = FALSE, self.contained = TRUE)
+
+```
+
+```{r loading needed packages}
+
+library("DESeq2")
+library(ggplot2)
+library("ggrepel")
+library(data.table)
+library(ggpubr)
+
+```
+
+```{r loading necessary Rdata}
+
+# counts tables and design dfs
+load("../../../Btgh_injected_morulae_SMARTSeq/src/Rmd/Rdata/counts_table.Rdata")
+load("../../../Btgh_injected_morulae_SMARTSeq/src/Rmd/Rdata/design_df.Rdata")
+counts_table_m <- counts_table
+design_df_m <- design_df
+load("Rdata/counts_table.Rdata")
+load("Rdata/design_df.Rdata")
+counts_table_b <- counts_table
+design_df_b <- design_df
+load("../../../Btgh_injected_2cell_SMARTSeq/src/Rmd/Rdata/counts_table.Rdata")
+load("../../../Btgh_injected_2cell_SMARTSeq/src/Rmd/Rdata/design_df.Rdata")
+counts_table_2cell <- counts_table
+design_df_2cell <- design_df
+
+# geneID2name mapping
+load("Rdata/geneID2name_w_ex.Rdata")
+
+# table of all DEGs made in preimpl_DEGs_dynamics.Rmd
+load("Rdata/DEGs_res_all_preimpl_activeVsDead_merged.Rdata")
+
+```
+
+```{r merging counts table and design dfs}
+
+# joining counts tables
+counts_table <- do.call("cbind", list(counts_table_2cell, counts_table_m, counts_table_b))
+# joining design dfs
+design_df_2cell$sex <- rep("not_applicable", nrow(design_df_2cell)) #Sex cannot be assigned at the 2-cell stage
+design_df <- rbind(design_df_2cell[, c("sample", "condition", "sex", "batch")], design_df_m[, c("sample", "condition", "sex", "batch")], design_df_b[, c("sample", "condition", "sex", "batch")])
+# adding stage to design df
+design_df$stage <- c(rep("2-cell", nrow(design_df_2cell)), rep("morulae", nrow(design_df_m)), rep("blastocysts", nrow(design_df_b)))
+# keeping only samples that passed all filterings. These are the ones left in loaded design dfs
+counts_table <- counts_table[, design_df$sample]
+# design df rownames have to be sample names, in same order as counts table columns
+rownames(design_df) <- design_df$sample
+
+```
+
+```{r creating big DESeqDataSet and performing DESeq to get normalized counts}
+
+dds <- DESeqDataSetFromMatrix(countData = counts_table,
+                              colData = design_df,
+                              design = ~ stage) # design is not important because I am not testing for Diff Expr
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+dds <- DESeq(dds)
+
+```
+
+```{r defining mean threshold}
+
+my_mean_threshold <- 10
+
+```
+
+For this PCA:
+
+1. I start with DESeq2-normalized data
+2. I keep only genes with DESeq2-normalized mean across samples > `r my_mean_threshold`
+3. I apply log2 transformation
+4. I perform PCA with package prcomp using the union of the DEGs coming from activeVsDead and activeVsCtrl comparisons at any of the three stages 
+
+```{r DEGs PCA functions}
+
+plotPCA_DESeq_norm_data_DEGs <- function (my_dds, intgroup, mean_threshold, my_DEGs, returnData = TRUE) {
+    # computing row means of DESeq2-normalized counts
+    rM <- rowMeans2(counts(my_dds, normalized = TRUE))
+    # creating object of normTransformed data i.e. log2 transformed DESeq2-normalized data
+    ntd <- normTransform(my_dds)
+    # keeping only genes with rowMean > my threshold
+    f_norm_counts <- assay(ntd)[rM > mean_threshold, ]
+    # PCA using only DEGs
+    pca <- prcomp(t(f_norm_counts[my_DEGs, ]))
+    percentVar <- pca$sdev^2/sum(pca$sdev^2)
+    if (!all(intgroup %in% names(colData(my_dds)))) {
+        stop("the argument 'intgroup' should specify columns of colData(dds)")
+    }
+    intgroup.df <- as.data.frame(colData(my_dds)[, intgroup, drop = FALSE])
+    group <- if (length(intgroup) > 1) {
+        factor(apply(intgroup.df, 1, paste, collapse = ":"))
+    }
+    else {
+        colData(my_dds)[[intgroup]]
+    }
+    d <- data.frame(PC1 = pca$x[, 1], PC2 = pca$x[, 2], PC3 = pca$x[, 3], PC4 = pca$x[, 4], intgroup.df, name = colnames(my_dds))
+    if (returnData) {
+        attr(d, "percentVar") <- percentVar[1:4]
+        return(d)
+    }
+}
+
+plotPCA_DESeq_norm_DEGs_w_marginals <- function (my_dds, intgroup, mean_threshold, my_DEGs, PC_x, PC_y) {
+  pcaData <- plotPCA_DESeq_norm_data_DEGs(my_dds = my_dds, intgroup = intgroup, mean_threshold = mean_threshold, my_DEGs = my_DEGs, returnData = TRUE)
+  percentVar <- round(100 * attr(pcaData, "percentVar"))
+  par(mfrow=c(2,1))
+  ggplot(pcaData, aes(pcaData[, PC_x], pcaData[, PC_y], color=pcaData[,5], shape=pcaData[,6])) +
+    geom_point(size=3, alpha = 0.5) +
+    geom_rug(aes(color = pcaData[,5]), alpha = 0.6) +
+    xlab(paste0("PC",PC_x,": ",percentVar[PC_x],"% variance")) +
+    ylab(paste0("PC",PC_y,": ",percentVar[PC_y],"% variance")) +
+    scale_color_discrete(name = colnames(pcaData)[5]) +
+    scale_shape_discrete(name = colnames(pcaData)[6]) +
+    coord_fixed() +
+    theme(axis.text = element_text(size = 14), axis.title = element_text(size = 16),
+        title = element_text(size = 16),
+        legend.text = element_text(size = 14), legend.title = element_text(size = 16),
+        legend.key.height = unit(1.5,"line"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+}
+
+```
+
+```{r PCA plots (FIGURE), include = TRUE}
+
+my_DEGs <- unique(DEGs_res_all_preimpl_activeVsDead_merged[, gene_id])
+plotPCA_DESeq_norm_DEGs_w_marginals(my_dds = dds, intgroup = c("condition", "stage"), mean_threshold = my_mean_threshold, my_DEGs = my_DEGs, PC_x = 1, PC_y = 2)
+
+```
+
+# Genes most associated with PC1 and PC2
+
+To understand how many genes to consider, I plot their cumulative variance shown in the data, ordered by their contribution to each PC.
+
+```{r RUVs PC loadings all genes cumvar, include = TRUE}
+
+library(gridExtra)
+library(factoextra)
+
+PC_loadings_cumvar_DEGs <- function (my_PC, my_dds, mean_threshold) {
+  # computing row means of DESeq2-normalized counts
+  rM <- rowMeans2(counts(my_dds, normalized = TRUE))
+  # creating object of normTransformed data i.e. log2 transformed DESeq2-normalized data
+  ntd <- normTransform(my_dds)
+  # keeping only genes with rowMean > my threshold
+  f_norm_counts <- assay(ntd)[rM > mean_threshold, ]
+  # pca using only DEGs
+  pca <- prcomp(t(f_norm_counts[my_DEGs, ]))
+  # variables contributions is stored in prcomp PCA results object
+  genes_contrib <- get_pca_var(pca)$contrib
+  # order contributions based on desired PC
+  genes_contrib <- genes_contrib[order(genes_contrib[, my_PC], decreasing = TRUE), ]
+  # plotting var cumulative distribution to understand how many genes might be relevant to consider
+  ggplot(data = data.frame(contrib_PC = genes_contrib[, my_PC], i = 1:length(genes_contrib[, my_PC])), aes(x = i, y = cumsum(contrib_PC))) + 
+    geom_line() + 
+    geom_point() +
+    ggtitle(paste0("DEGs PCA - PC", my_PC))
+}
+
+do.call(grid.arrange, lapply(1:2, PC_loadings_cumvar_DEGs, my_dds = dds, mean_threshold = my_mean_threshold))
+
+```
+
+--> I store the 50 and 30 genes mostly associated with PC1 and PC2 (i.e. with highest **contribution**), respectively, together with their **coordinates** on PC1 and PC2. 
+
+```{r PC loadings DEGs PCA}
+
+# Function which makes table for genes mostly associated with desired PC
+get_PC_loadings_table_DEGs <- function (my_PC, my_dds, mean_threshold, my_var_N) {
+  # computing row means of DESeq2-normalized counts
+  rM <- rowMeans2(counts(my_dds, normalized = TRUE))
+  # creating object of normTransformed data i.e. log2 transformed DESeq2-normalized data
+  ntd <- normTransform(my_dds)
+  # keeping only genes with rowMean > my threshold
+  f_norm_counts <- assay(ntd)[rM > mean_threshold, ]
+  # pca using only DEGs
+  pca <- prcomp(t(f_norm_counts[my_DEGs, ]))
+  # results for variables can be retrieved from pca object using package 'factoextra'
+  genes_contrib <- get_pca_var(pca)$contrib
+  genes_coord <- get_pca_var(pca)$coord
+  # order contributions based on desired PC
+  genes_contrib <- genes_contrib[order(genes_contrib[, my_PC], decreasing = TRUE), ]
+  # First N genes most highly contributing to desired PC
+  PC_loadings <- data.table(gene_id = rownames(genes_contrib)[1:my_var_N], contrib = genes_contrib[, my_PC][1:my_var_N])
+  # getting gene names
+  PC_loadings <- merge(PC_loadings, geneID2name_w_ex, by = "gene_id")
+  # getting gene coordinates on desired PC
+  genes_coord_df <- data.frame(gene_id = rownames(genes_coord), coord = genes_coord[, my_PC])
+  PC_loadings <- merge(PC_loadings, genes_coord_df, by = "gene_id")
+  # returning, ordered by contribution and w coord info
+  return(PC_loadings[order(PC_loadings$contrib, decreasing = TRUE), c("gene_id", "gene_name", "coord")])
+}
+
+PCA_DEGs_PC1_loadings <- get_PC_loadings_table_DEGs(my_PC = 1, my_dds = dds, mean_threshold = my_mean_threshold, my_var_N = 50)
+PCA_DEGs_PC2_loadings <- get_PC_loadings_table_DEGs(my_PC = 2, my_dds = dds, mean_threshold = my_mean_threshold, my_var_N = 30)
+
+# save to file for analysis of dynamics using public RNA-Seq data (in OGlcNAc_early_embryo_Formichetti2023/embryo_public_data_GSE66582_GSE76505_reanalysis/src/Rmd/Btgh_PCA_genes_dynamics.Rmd)
+write.table(PCA_DEGs_PC1_loadings, file = "../../analysis/PC_loadings/DEGs_PCA_PC1_first_50_genes.csv", quote = FALSE, sep = ",", row.names = FALSE, col.names = TRUE)
+write.table(PCA_DEGs_PC2_loadings, file = "../../analysis/PC_loadings/DEGs_PCA_PC2_first_30_genes.csv", quote = FALSE, sep = ",", row.names = FALSE, col.names = TRUE)
+
+```
+
+```{r sessioninfo, echo = TRUE, results = 'markup'}
+
+sessionInfo()
+
+```

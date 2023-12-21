@@ -1,0 +1,519 @@
+---
+title: "SMART-Seq2 mRNA-Seq of blastocysts injected and nonInjected w active/dead-Btgh  - embryo filtering and clustering"
+date: "July 12th, 2022"
+author: 
+- name: Sara Formichetti
+  affiliation: EMBL Rome
+  email: sara.formichetti@embl.it
+output:
+  prettydoc::html_pretty:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    fig_caption: yes
+---
+
+```{r Setting general options, include=FALSE}
+
+knitr::opts_chunk$set(autodep = TRUE, cache = TRUE, echo = FALSE, warning = FALSE, message = FALSE, results = 'hide', fig.width=12, fig.height=8)
+
+```
+
+```{r loading needed packages}
+
+library(ggplot2)
+library(reshape2)
+library(data.table)
+library("DESeq2")
+library(ggpubr)
+library(gridExtra)
+library(pheatmap)
+library(ggrepel)
+library(vsn)
+library(RUVSeq)
+library(dplyr)
+
+```
+
+```{r creating tx2gene and geneID2name df}
+
+# Creating the transcriptID2geneID df; the transcriptID2geneID tsv file has been created with custom shell script tx2gene_from_encode_gtf.sh in src/sh folder
+tx2gene <- fread("../../data/annotations/gencode.vM25.annotation.tx2gene.tsv", col.names = c("tx_id", "gene_id"))
+# removing version
+tx2gene <- tx2gene[,  lapply(.SD, gsub, pattern = "\\..*", replacement = ""), .SDcols = names(tx2gene)]
+# Adding to the tx2gene DataFrame the transcript-gene pairs corresponding to OsTIR and AID
+tg_tx2gene <- DataFrame(tx_id = paste0(c("NLS_EGFP_activeBtgh_NLS", "NLS_EGFP_deadBtgh_NLS"), "_transcript"), gene_id = paste0(c("NLS_EGFP_activeBtgh_NLS", "NLS_EGFP_deadBtgh_NLS"), "_gene"))
+tx2gene_w_ex <- rbind(tx2gene, tg_tx2gene)
+
+# Creating the geneID2geneName df; the geneID2geneName tsv file has been created with custom shell script geneID2name_from_encode_gtf.sh in src/sh folder
+geneID2name <- fread("../../data/annotations/gencode.vM25.annotation.geneID2name.tsv", col.names = c("gene_id", "gene_name"))
+# removing version
+geneID2name <- geneID2name[,  lapply(.SD, gsub, pattern = "\\..*", replacement = ""), .SDcols = names(geneID2name)]
+# Adding the transgenes
+tg_geneID2name <- DataFrame(gene_id = paste0(c("NLS_EGFP_activeBtgh_NLS", "NLS_EGFP_deadBtgh_NLS"), "_gene"), gene_name = paste0(c("NLS_EGFP_activeBtgh_NLS", "NLS_EGFP_deadBtgh_NLS"), "_gene"))
+geneID2name_w_ex <- rbind(geneID2name, tg_geneID2name)
+
+# Merging the 2 dfs
+gene_map_dt <- as.data.table(merge(geneID2name_w_ex, tx2gene_w_ex, by = "gene_id"))
+
+```
+
+# Design of the experiment
+
+```{r files path}
+
+# directory containing featureCounts outputs
+dir <- "../../data/sequencing/featureCounts/STAR_default"
+# vector of file names
+files <- grep("_counts", sort(list.files(path = dir)), value = TRUE)
+# Excluding samples that got very few number of reads
+files <- files[!(grepl("bC20sequence|bC24sequence|bC25sequence|bC28sequence", files))]
+# adding the path
+files_w_path <- file.path(dir, files)
+
+```
+
+```{r reading sample metadata}
+
+# reading table containing sample names and day of collection
+samples_table <- fread("../../data/sequencing/samples_table.csv")
+design_df <- as.data.frame(samples_table)
+# Excluding samples that got very few number of reads
+design_df <- design_df[!(design_df$sample %in% c("bC20", "bC24", "bC25", "bC28")), ]
+# Specifying BATCH as a discrete variable
+design_df$batch <- as.character(design_df$batch)
+# reading rDNA stats
+rDNA_reads <- fread("../../data/sequencing/stats/rDNA.txt", header = FALSE)
+# sample name and perc of reads mapped to rDNA are in V1 column
+rDNA_reads$sample <- gsub("\\..*", "", rDNA_reads$V1)
+rDNA_reads$perc_rDNA <- as.numeric(gsub("%", "", gsub(".*:", "", rDNA_reads$V1)))
+rDNA_reads <- rDNA_reads[, .(sample, perc_rDNA)]
+# merging rDNA info with design df
+design_df <- merge(design_df, rDNA_reads, by = "sample")
+rownames(design_df) <- design_df$sample # necessary to make dds
+# reordering design df for visualization purposes
+design_df <- design_df[order(design_df$condition, decreasing = TRUE), ]
+
+```
+
+```{r design table, results='asis'}
+
+knitr::kable(design_df, row.names = FALSE)
+
+```
+
+```{r reading counts}
+
+# reading and merging all files in one data.frame by Geneid
+counts_table <- as.data.frame(Reduce(function(...) merge(..., by = c("Geneid")), lapply(files_w_path, function (f) {fread(f)})))
+# simplifying colnames by leaving only the sample name
+colnames(counts_table) <- gsub("H7L2NBGXM_Btgh_injected_blasto_22s002457-1-1_Formichetti_lane1pl4", "", gsub("sequence.txt", "", names(counts_table)))
+# adding gene ids as rownames
+rownames(counts_table) <- counts_table$Geneid
+counts_table$Geneid <- NULL
+# removing version from gene ids
+rownames(counts_table) <- gsub("\\..*", "", rownames(counts_table))
+# reordering counts table based on sample order in design df
+counts_table <- counts_table[, rownames(design_df)]
+
+```
+
+# Quality filtering of embryos
+
+```{r mt genes in metadata}
+
+# reading mt genes
+mt_genes <- fread("../../data/annotations/gencode.vM25.mt_genes.csv")
+# removing version from gene id
+mt_genes$gene_id <- gsub("\\..*", "", mt_genes$gene_id)
+
+# for each sample, proportion of counts for mt genes
+counts_table_qc <- as.data.table(counts_table)
+counts_table_qc$gene_id <- rownames(counts_table)
+mt_genes_counts <- apply(merge(counts_table_qc, mt_genes, by = "gene_id", all.x = FALSE, all.y = TRUE)[, 2:ncol(counts_table_qc)], 2, sum)
+tot_counts <- apply(counts_table, 2, sum)
+mt_genes_table <- data.table(sample = colnames(counts_table), mt_genes_counts = mt_genes_counts, tot_counts = tot_counts)
+design_df <- merge(design_df, mt_genes_table, by = "sample")
+# reordering design df for visualization purposes
+design_df <- design_df[order(design_df$condition, decreasing = TRUE), ]
+rownames(design_df) <- design_df$sample
+
+```
+
+```{r quality filtering plot, include = TRUE}
+
+ggplot(data = design_df, aes(x = perc_rDNA, y = mt_genes_counts/tot_counts*100, label = sample, color = condition, shape = batch)) +
+  geom_point(size = 4) +
+  geom_text_repel(size = 3) +
+  xlab("perc rDNA reads") +
+  ylab("perc mt genes counts") +
+  theme(title = element_text(size = 20),
+        legend.text = element_text(size = 20), legend.title = element_text(size = 20),
+        axis.text = element_text(size = 19),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+  
+```
+
+I remove samples bA9, bA8, bD9 because outliers in the scatterplot.
+
+```{r excluding bad samples}
+
+design_df <- design_df[!(design_df$sample %in% c("bA9", "bA8", "bD9")), ]
+rownames(design_df) <- design_df$sample
+counts_table <- counts_table[, rownames(design_df)]
+
+design_df_before_aneupl_filter <- design_df
+
+```
+
+I also exclude samples which are potentially anaeuploidic based on result in 'Diff_allelic_expression_from_featureCounts' Rmd.
+
+```{r excluding aneuploidic samples}
+
+design_df <- design_df[!(design_df$sample %in% c("bA10", "bD20", "bC19", "bC4", "bA11", "bA12", "bD5")), ]
+rownames(design_df) <- design_df$sample
+counts_table <- counts_table[, rownames(design_df)]
+
+```
+
+# Counts of Btgh RNA molecules
+
+```{r creating DESeqDataSet}
+
+# creating DESeqDataSet from count table
+dds <- DESeqDataSetFromMatrix(countData = counts_table,
+                              colData = design_df,
+                              design = ~ condition)
+
+```
+
+```{r DESeq function to compute size factors for gene counts}
+
+# the standard differential expression analysis steps are wrapped into a single function, DESeq
+dds <- DESeq(dds)
+
+```
+
+```{r counts of injected RNA molecules, include = TRUE}
+
+tg <- tg_tx2gene$gene_id
+names(tg) <- tg_tx2gene$gene_id
+
+# storing the Btgh gene counts in a df
+Btgh_l <- lapply(1:2, function(g){d <- plotCounts(dds, gene = tg[g], intgroup = c("condition"), returnData = TRUE); d$sample = rownames(d); return(d)})
+Btgh_counts <- merge(Btgh_l[[1]], Btgh_l[[2]], by = c("sample", "condition"))
+names(Btgh_counts) <- c("sample", "condition", "activeBtgh", "deadBtgh")
+
+# plotting Btgh counts
+my_plotCounts <- function (g, my_GOIs, my_dds) {
+  if (sum(grepl(my_GOIs[g], my_dds@rowRanges@partitioning@NAMES)) > 0) {
+    d <- plotCounts(my_dds, gene = my_GOIs[g], intgroup = c("condition"), returnData = TRUE)
+    ggplot(d, aes(x = condition, y = count, label = rownames(d))) + 
+      geom_point(position=position_jitter(w=0.1,h=0), size = 4) + 
+      scale_y_log10() +
+      geom_text_repel(size = 3) +
+      ggtitle(names(my_GOIs)[g]) +
+      theme(title = element_text(size = 20),
+        legend.text = element_text(size = 20), legend.title = element_text(size = 20),
+        axis.text = element_text(size = 19, angle = 60, vjust = 0.5, hjust = 1),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+  }
+}
+
+do.call("ggarrange", args = list(plotlist = lapply(1:2, my_plotCounts, my_dds = dds, my_GOIs = tg), common.legend = TRUE, legend = "right"))
+
+```
+
+```{r saving current counts table for all-stages-plots}
+
+save(counts_table, file = "Rdata/counts_table_w_Btgh.Rdata")
+
+```
+
+The Btgh mRNA is not detectable anymore at this embryo stage. From now on, I remove the transgenes from the data.
+
+```{r removing transgenes}
+
+rm(dds)
+
+# excluding transgenes from counts table
+counts_table <- counts_table[!(rownames(counts_table) %in% c("NLS_EGFP_activeBtgh_NLS_gene", "NLS_EGFP_deadBtgh_NLS_gene")), ]
+
+# rebuilding dds
+dds <- DESeqDataSetFromMatrix(countData = counts_table,
+                              colData = design_df,
+                              design = ~ condition)
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+dds <- DESeq(dds)
+
+```
+
+# Establishing sex of embryos
+
+```{r sexing gene counts}
+
+sexing_genes <- gene_map_dt[gene_name %in% c("Ddx3y", "Xist"), unique(gene_id)]
+names(sexing_genes) <- gene_map_dt[gene_name %in% c("Ddx3y", "Xist"), unique(gene_name)]
+
+get_norm_dds_counts <- function (my_gene_id, my_dds, my_design_df) {
+  return(plotCounts(dds, gene = my_gene_id, intgroup = c("sample", "batch", "condition"), returnData = TRUE, normalized = TRUE))
+}
+
+sexing_gene_counts_list <- lapply(sexing_genes, get_norm_dds_counts, my_dds = dds, my_design_df = design_df)
+sfx <- paste0(".", names(sexing_genes))
+sexing_gene_counts <- sexing_gene_counts_list[[1]]
+for(i in head(seq_along(sexing_gene_counts_list), n = -1L)) {
+ sexing_gene_counts <- merge(sexing_gene_counts, sexing_gene_counts_list[[i+1]],
+                            all = TRUE, 
+                            suffixes = sfx[i:(i+1)], 
+                            by = c("sample", "batch", "condition"))
+}
+
+```
+
+```{r plot sexing counts, include = TRUE}
+
+ggplot(sexing_gene_counts, aes(x = count.Ddx3y, y = count.Xist, colour = condition, label = sample)) +
+  geom_point(size = 3) +
+  geom_text_repel(size = 6) +
+  theme(title = element_text(size = 20),
+        legend.text = element_text(size = 20), legend.title = element_text(size = 20),
+        axis.text = element_text(size = 19),
+        legend.key.height = unit(1.5,"line"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+
+```
+
+I define as males those embryos with counts for Ddx3y > 150.
+
+```{r adding sex to design df}
+
+design_df <- merge(design_df, sexing_gene_counts, by = c("sample", "batch", "condition"))
+design_df$sex <- ifelse(design_df$count.Ddx3y > 150, "M", "F")
+# reordering design df for visualization purposes
+design_df <- design_df[order(design_df$condition, decreasing = TRUE), ]
+
+rownames(design_df) <- design_df$sample
+
+```
+
+# Sample clustering
+
+## Heatmap for quality assessment
+
+After applying the log2(n + 1) transformation, I plot heatmaps of normalized counts for top highly expressed genes to check for eventual big sample heterogeneity present in the dataset. 
+
+```{r pheatmap after data transformation, include = TRUE}
+
+highest_expr_hm <- function (my_dds, my_title) {
+  select <- order(rowMeans(counts(my_dds, normalized = FALSE)), decreasing = TRUE)[1:20]
+  design_df_h <- as.data.frame(colData(my_dds)[,c("condition", "batch")])
+  rownames(design_df_h) <- colnames(counts(my_dds))
+  colnames(design_df_h) <- c("condition", "batch")
+  my_ntd <- normTransform(my_dds)
+  pheatmap(assay(my_ntd)[select,], cluster_rows = FALSE, show_rownames = TRUE, show_colnames = TRUE, cluster_cols = TRUE, annotation_col = design_df_h, main = my_title)
+}
+
+highest_expr_hm(dds, my_title = "")
+
+```
+
+No major samples heterogeneity.
+
+## PCA
+
+```{r defining mean threshold and var genes number threshold}
+
+my_mean_threshold <- 10
+my_ntop <- 1000
+
+```
+
+For this PCA:
+
+1. I start with DESeq2-normalized data
+2. I keep only genes with DESeq2-normalized mean across samples > `r my_mean_threshold`
+3. I apply log2 transformation
+4. I perform PCA with package prcomp using the `r my_ntop` genes with the highest variance
+
+```{r PCA functions}
+
+plotPCA_DESeq_norm_data <- function (my_dds, intgroup, mean_threshold, ntop, returnData = TRUE) {
+    # computing row means of DESeq2-normalized counts
+    rM <- rowMeans2(counts(my_dds, normalized = TRUE))
+    # creating object of normTransformed data i.e. log2 transformed DESeq2-normalized data
+    ntd <- normTransform(my_dds)
+    # keeping only genes with rowMean > my threshold
+    f_norm_counts <- assay(ntd)[rM > mean_threshold, ]
+    # computing row vars of log2 transformed DESeq2-normalized counts
+    rv <- rowVars(f_norm_counts)
+    # selecting the first ntop genes based on var computed on line above
+    select <- order(rv, decreasing = TRUE)[seq_len(min(ntop,length(rv)))]
+    # pca of the selected genes
+    pca <- prcomp(t(f_norm_counts[select, ]))
+    percentVar <- pca$sdev^2/sum(pca$sdev^2)
+    if (!all(intgroup %in% names(colData(my_dds)))) {
+        stop("the argument 'intgroup' should specify columns of colData(dds)")
+    }
+    intgroup.df <- as.data.frame(colData(my_dds)[, intgroup, drop = FALSE])
+    group <- if (length(intgroup) > 1) {
+        factor(apply(intgroup.df, 1, paste, collapse = ":"))
+    }
+    else {
+        colData(my_dds)[[intgroup]]
+    }
+    d <- data.frame(PC1 = pca$x[, 1], PC2 = pca$x[, 2], PC3 = pca$x[, 3], PC4 = pca$x[, 4], intgroup.df, name = colnames(my_dds))
+    if (returnData) {
+        attr(d, "percentVar") <- percentVar[1:4]
+        return(d)
+    }
+}
+
+plotPCA_DESeq_norm <- function (my_dds, intgroup, mean_threshold, ntop, PC_x, PC_y) {
+  pcaData <- plotPCA_DESeq_norm_data(my_dds = my_dds, intgroup = intgroup, mean_threshold = mean_threshold, ntop = ntop, returnData = TRUE)
+  percentVar <- round(100 * attr(pcaData, "percentVar"))
+  par(mfrow=c(2,1))
+  ggplot(pcaData, aes(pcaData[, PC_x], pcaData[, PC_y], color=pcaData[,5], shape=pcaData[,6], label = rownames(pcaData))) +
+    geom_point(size=4) +
+    xlab(paste0("PC",PC_x,": ",percentVar[PC_x],"% variance")) +
+    ylab(paste0("PC",PC_y,": ",percentVar[PC_y],"% variance")) +
+    scale_color_discrete(name = colnames(pcaData)[5]) +
+    scale_shape_discrete(name = colnames(pcaData)[6]) +
+    geom_text_repel(size = 3) +
+    coord_fixed() +
+    theme(axis.text = element_text(size = 22), axis.title = element_text(size = 22),
+        title = element_text(size = 22),
+        legend.text = element_text(size = 22), legend.title = element_text(size = 22),
+        legend.key.height = unit(1.5,"line"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(),
+        axis.line = element_line(colour = "black"))
+}
+
+```
+
+```{r PCA plots, include = TRUE}
+
+plotPCA_DESeq_norm(my_dds = dds, intgroup = c("condition", "batch"), mean_threshold = my_mean_threshold, ntop = my_ntop, PC_x = 1, PC_y = 2)
+plotPCA_DESeq_norm(my_dds = dds, intgroup = c("condition", "batch"), mean_threshold = my_mean_threshold, ntop = my_ntop, PC_x = 2, PC_y = 3)
+plotPCA_DESeq_norm(my_dds = dds, intgroup = c("batch", "condition"), mean_threshold = my_mean_threshold, ntop = my_ntop, PC_x = 1, PC_y = 2)
+plotPCA_DESeq_norm(my_dds = dds, intgroup = c("batch", "condition"), mean_threshold = my_mean_threshold, ntop = my_ntop, PC_x = 2, PC_y = 3)
+
+```
+
+Two main conclusions:
+
+* **Unwanted variation correlated with batch** is visible in PC2/3.
+* No clear clustering due to experimental group.
+
+I will try to remove the unwanted variation using package function **RUVs** of package **RUVSeq** and replot PCA to see whether something changes. 
+
+```{r RUVs}
+
+# pre-filtering low count genes from counts table
+keep <- rowSums(counts_table) >= 10
+counts_table_f <- counts_table[keep, ]
+
+# Building expression set for RUVSeq
+phenoData <- data.frame(condition = design_df$condition, batch = design_df$batch, row.names = colnames(counts_table_f))
+phenoData <- data.frame(condition = design_df$condition, batch = design_df$batch, row.names = colnames(counts_table), color_cond = rep(c("black", "lightblue", "red"), as.integer(table(design_df$condition)[unique(design_df$condition)])), color_batch = design_df$batch)
+ses <- newSeqExpressionSet(as.matrix(counts_table_f), phenoData = phenoData)
+
+differences <- makeGroups(design_df$condition)
+ses1 <- RUVs(ses, rownames(counts_table_f), k = 1, differences)
+ses2 <- RUVs(ses, rownames(counts_table_f), k = 2, differences)
+ses3 <- RUVs(ses, rownames(counts_table_f), k = 3, differences)
+ses4 <- RUVs(ses, rownames(counts_table_f), k = 4, differences)
+
+```
+
+### Examining RUVs effect via PCA and RLE plots
+
+```{r RUVs effect, include = TRUE}
+
+EDASeq::plotPCA(ses, col=pData(ses)$color_batch, cex=1.2, labels = FALSE, main = "original counts - coloured by batch", k = 3)
+EDASeq::plotPCA(ses, col=pData(ses)$color_cond, cex=1.2, labels = FALSE, main = "original counts - coloured by condition", k = 3)
+EDASeq::plotPCA(ses1, col=pData(ses1)$color_batch, cex=1.2, labels = FALSE, main = "k = 1 - coloured by batch", k = 3)
+EDASeq::plotPCA(ses1, col=pData(ses1)$color_cond, cex=1.2, labels = FALSE, main = "k = 1 - coloured by condition", k = 3)
+EDASeq::plotPCA(ses2, col=pData(ses2)$color_batch, cex=1.2, labels = FALSE, main = "k = 2 - coloured by batch", k = 3)
+EDASeq::plotPCA(ses2, col=pData(ses2)$color_cond, cex=1.2, labels = FALSE, main = "k = 2 - coloured by condition", k = 3)
+EDASeq::plotPCA(ses3, col=pData(ses3)$color_batch, cex=1.2, labels = FALSE, main = "k = 3 - coloured by batch", k = 3)
+EDASeq::plotPCA(ses3, col=pData(ses3)$color_cond, cex=1.2, labels = FALSE, main = "k = 3 - coloured by condition", k = 3)
+EDASeq::plotPCA(ses4, col=pData(ses4)$color_batch, cex=1.2, labels = FALSE, main = "k = 4 - coloured by batch", k = 3)
+EDASeq::plotPCA(ses4, col=pData(ses4)$color_cond, cex=1.2, labels = FALSE, main = "k = 4 - coloured by condition", k = 3)
+
+plotRLE(ses, col=pData(ses)$color_batch, ylim=c(-4, 4), outline = FALSE, main = "original counts")
+plotRLE(ses1, col=pData(ses1)$color_batch, ylim=c(-4, 4), outline = FALSE, main = "k=1")
+plotRLE(ses2, col=pData(ses2)$color_batch, ylim=c(-4, 4), outline = FALSE, main = "k=2")
+plotRLE(ses3, col=pData(ses3)$color_batch, ylim=c(-4, 4), outline = FALSE, main = "k=3")
+
+```
+
+RUVSeq starts to reduce the batch effect from k = 3 --> **I will use the first 3 factors of unwanted variation in DE analysis (DE_analysis.Rmd)**
+
+I plot the PCA of DESeq2-normalized and log2 transformed data computed as above BUT starting with RUVs adjusted raw counts with k = 3.
+
+# Number of embryos after all filtering steps
+
+The following numbers of embryos per conditions are left after all filtering steps. These will be input to the DE analysis in next Rmd.
+
+```{r samples after filtering, results='markup'}
+
+table(design_df$condition, design_df$sex)
+
+```
+
+```{r saving objects needed in next Rmd}
+
+save(design_df_before_aneupl_filter, file = "Rdata/design_df_before_aneupl_filter.Rdata")
+save(design_df, file = "Rdata/design_df.Rdata")
+save(gene_map_dt, file = "Rdata/gene_map_dt.Rdata")
+save(geneID2name_w_ex, file = "Rdata/geneID2name_w_ex.Rdata")
+save(counts_table, file = "Rdata/counts_table.Rdata")
+save(ses3, file = "Rdata/ses3.Rdata")
+
+```
+
+```{r sessioninfo, echo = TRUE, results = 'markup'}
+
+sessionInfo()
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

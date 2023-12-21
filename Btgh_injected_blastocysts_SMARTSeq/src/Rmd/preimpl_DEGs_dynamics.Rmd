@@ -1,0 +1,242 @@
+---
+title: "Dynamics of Differentially Expressed Genes (DEGs) across preimplantation stages"
+date: "January 4th, 2022"
+author: 
+- name: Sara Formichetti
+  affiliation: EMBL Rome
+  email: sara.formichetti@embl.it
+output: html_document
+---
+
+```{r Setting general options, include=FALSE}
+
+knitr::opts_chunk$set(autodep = TRUE, cache = TRUE, echo = FALSE, warning = FALSE, message = FALSE, self.contained = TRUE)
+
+```
+
+```{r loading needed packages}
+
+library("DESeq2")
+library(ggplot2)
+library("ggrepel")
+library(data.table)
+
+```
+
+```{r loading necessary Rdata}
+
+load("../../../Btgh_injected_morulae_SMARTSeq/src/Rmd/Rdata/res_all.Rdata")
+load("../../../Btgh_injected_morulae_SMARTSeq/src/Rmd/Rdata/design_df.Rdata")
+res_m <- res_all
+design_df_m <- design_df
+load("../../../Btgh_injected_blastocysts_SMARTSeq/src/Rmd/Rdata/res_all_RUVs.Rdata")
+load("../../../Btgh_injected_blastocysts_SMARTSeq/src/Rmd/Rdata/design_df.Rdata")
+res_b <- res_all_RUVs
+design_df_b <- design_df
+load("../../../Btgh_injected_2cell_SMARTSeq/src/Rmd/Rdata/res_all_RUVs.Rdata")
+load("../../../Btgh_injected_2cell_SMARTSeq/src/Rmd/Rdata/design_df.Rdata")
+res_2cell <- res_all_RUVs
+design_df_2cell <- design_df
+load("Rdata/geneID2name_w_ex.Rdata")
+
+```
+
+
+```{r reading all DEGs}
+
+# 2-cell DEGs
+DEGs_2c_activeVsDead <- fread("../../../Btgh_injected_2cell_SMARTSeq/analysis/DESeq/RUVs/all/active_Btgh_vs_dead_Btgh_DEG_by_pvalue.csv")
+DEGs_2c_activeVsCtrl <- fread("../../../Btgh_injected_2cell_SMARTSeq/analysis/DESeq/RUVs/all/active_Btgh_vs_non_injected_DEG_by_pvalue.csv")
+DEGs_2c_deadVsCtrl <- fread("../../../Btgh_injected_2cell_SMARTSeq/analysis/DESeq/RUVs/all/dead_Btgh_vs_non_injected_DEG_by_pvalue.csv")
+
+# morulae DEGs
+DEGs_mor_activeVsDead <- fread("../../../Btgh_injected_morulae_SMARTSeq/analysis/DESeq/active_Btgh_vs_dead_Btgh_DEG_by_pvalue.csv")
+DEGs_mor_activeVsCtrl <- fread("../../../Btgh_injected_morulae_SMARTSeq/analysis/DESeq/active_Btgh_vs_non_injected_DEG_by_pvalue.csv")
+DEGs_mor_deadVsCtrl <- fread("../../../Btgh_injected_morulae_SMARTSeq/analysis/DESeq/dead_Btgh_vs_non_injected_DEG_by_pvalue.csv")
+
+# blastocysts DEGs
+DEGs_blasto_activeVsDead <- fread("../../../Btgh_injected_blastocysts_SMARTSeq/analysis/DESeq/RUVs/active_Btgh_vs_dead_Btgh_DEG_by_pvalue.csv")
+DEGs_blasto_activeVsCtrl <- fread("../../../Btgh_injected_blastocysts_SMARTSeq/analysis/DESeq/RUVs/active_Btgh_vs_non_injected_DEG_by_pvalue.csv")
+DEGs_blasto_deadVsCtrl <- fread("../../../Btgh_injected_blastocysts_SMARTSeq/analysis/DESeq/RUVs/dead_Btgh_vs_non_injected_DEG_by_pvalue.csv")
+
+```
+
+# Overlap between DEGs found at the three stages
+
+```{r venn DEGs}
+
+library(gplots)
+
+twocell_active <- unique(c(DEGs_2c_activeVsCtrl$gene_id[DEGs_2c_activeVsCtrl$baseMean > 10], DEGs_2c_activeVsDead$gene_id[DEGs_2c_activeVsDead$baseMean > 10]))
+mor_active <- unique(c(DEGs_mor_activeVsCtrl$gene_id[DEGs_mor_activeVsCtrl$baseMean > 10], DEGs_mor_activeVsDead$gene_id[DEGs_mor_activeVsDead$baseMean > 10]))
+blasto_active <- unique(c(DEGs_blasto_activeVsCtrl$gene_id[DEGs_blasto_activeVsCtrl$baseMean > 10], DEGs_blasto_activeVsDead$gene_id[DEGs_blasto_activeVsDead$baseMean > 10]))
+venn(list(`2c active all` = twocell_active, `morula active all` = mor_active, `blasto active all` = blasto_active), show.plot=TRUE)
+
+venn(list(`2c dead vs ctrl` = DEGs_2c_deadVsCtrl$gene_id[DEGs_2c_deadVsCtrl$baseMean > 10], `morula dead vs ctrl` = DEGs_mor_deadVsCtrl$gene_id[DEGs_mor_deadVsCtrl$baseMean > 10], `blasto dead vs ctrl` = DEGs_blasto_deadVsCtrl$gene_id[DEGs_blasto_deadVsCtrl$baseMean > 10]), show.plot=TRUE)
+
+```
+
+# DEGs expression change across all stages
+
+```{r merging DEGs}
+
+## rowbinding DEGs of the activeVsDead and activeVsCtrl comparisons for the three stages
+
+comb_DEGs_dt <- rbind(DEGs_2c_activeVsDead, DEGs_2c_activeVsCtrl, DEGs_mor_activeVsDead, DEGs_mor_activeVsCtrl, DEGs_blasto_activeVsDead, DEGs_blasto_activeVsCtrl)
+comb_DEGs_dt$stage <- rep(c("2c", "morulae", "blastocysts"), c((nrow(DEGs_2c_activeVsDead)+nrow(DEGs_2c_activeVsCtrl)), (nrow(DEGs_mor_activeVsDead)+nrow(DEGs_mor_activeVsCtrl)), (nrow(DEGs_blasto_activeVsDead)+nrow(DEGs_blasto_activeVsCtrl))))
+comb_DEGs_dt$comparison <- rep(c("activeVsDead", "activeVsCtrl", "activeVsDead", "activeVsCtrl", "activeVsDead", "activeVsCtrl"), c(nrow(DEGs_2c_activeVsDead), nrow(DEGs_2c_activeVsCtrl), nrow(DEGs_mor_activeVsDead), nrow(DEGs_mor_activeVsCtrl), nrow(DEGs_blasto_activeVsDead), nrow(DEGs_blasto_activeVsCtrl)))
+# selecting only the ones with baseMean >= 10 in that stage
+comb_DEGs_dt <- comb_DEGs_dt[baseMean > 10]
+
+## annotating list of genes with stage of diff expression 
+
+# long to large dt
+DEGs_stage <- dcast(unique(comb_DEGs_dt[, .(gene_id, gene_name, stage)]), gene_id + gene_name ~ stage, value.var = "stage")
+# substituting NAs with empty string
+DEGs_stage$`2c`[is.na(DEGs_stage$`2c`)] <- ""
+DEGs_stage$morulae[is.na(DEGs_stage$morulae)] <- ""
+DEGs_stage$blastocysts[is.na(DEGs_stage$blastocysts)] <- ""
+# creating variable with all stages of diff expr
+DEGs_stage$DE_stage <- gsub("\\.\\.", ".", gsub("\\.*$", "", gsub("^\\.*", "", paste(DEGs_stage$`2c`, DEGs_stage$morulae, DEGs_stage$blastocysts, sep = "."))))
+
+```
+
+```{r log2FC of DEGs dt}
+
+# make list of DESeq results for the activeVsDead comparison
+res_all_preimpl_activeVsDead <- list(twocell = res_2cell$active_vs_dead, morulae = res_m$active_vs_dead, blasto = res_b$active_vs_dead)
+
+# function to select DEGs and make dt from DESeq res
+get_DEGs_dt <- function (i, my_res_list, my_DEGs_dt) {
+  # res as data.table
+  res_dt <- as.data.table(my_res_list[[i]])
+  # storing stage into column names
+  names(res_dt) <- paste0(names(res_dt), ".", names(my_res_list)[[i]])
+  # gene ids were the rownames of the res table
+  res_dt$gene_id <- rownames(my_res_list[[i]])
+  res_dt <- merge(res_dt, unique(my_DEGs_dt[, .(gene_id, gene_name)]), by = "gene_id", all = FALSE)
+  return(res_dt)
+}
+
+# applying to active vs dead comparison
+DEGs_res_all_preimpl_activeVsDead <- lapply(1:length(res_all_preimpl_activeVsDead), get_DEGs_dt, my_DEGs_dt = comb_DEGs_dt, my_res_list = res_all_preimpl_activeVsDead)
+# merge res for all stages
+DEGs_res_all_preimpl_activeVsDead_merged <- Reduce(function(...) merge(..., by = c("gene_id", "gene_name")), DEGs_res_all_preimpl_activeVsDead)
+# excluding genes with baseMean < 10 at any stage
+DEGs_res_all_preimpl_activeVsDead_merged <- DEGs_res_all_preimpl_activeVsDead_merged[baseMean.blasto >= 10 & baseMean.morulae >= 10 & baseMean.twocell >= 10]
+# adding diff expr stage
+DEGs_res_all_preimpl_activeVsDead_merged <- merge(DEGs_res_all_preimpl_activeVsDead_merged, DEGs_stage[, .(gene_id, DE_stage)], by = "gene_id")
+
+save(DEGs_res_all_preimpl_activeVsDead_merged, file = "Rdata/DEGs_res_all_preimpl_activeVsDead_merged.Rdata") # needed for PCA with all preimpl stages using DEGs (FIGURE) in another Rmd
+
+```
+
+Genes coherently changing in the two stages in the plot (i.e. l2FC>=0.05 or <=-0.05 in both stages and with at least abs(l2FC)>=0.1 in one of the two stages) are colored and labeled.
+
+```{r color and label DEGs in scatter}
+
+## Genes coherently changing in the two stages in the plot (i.e. l2FC>=0.05 or <=-0.05 in both stages and with at least abs(l2FC)>=0.1 in one of the two stages) are colored, genes coherently changing in all three stages (i.e. l2FC>=0.05 or <=-0.05 in all three stages and with at least abs(l2FC)>=0.1 in one of the three stages) are also labeled
+
+DEGs_res_all_preimpl_activeVsDead_merged$color_twocell_mor <- "none"
+DEGs_res_all_preimpl_activeVsDead_merged$color_twocell_mor[DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.twocell >= 0.05 & DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.morulae >= 0.05 & (DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.twocell >= 0.1 | DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.morulae >= 0.1)] <- "twocell_mor_up"
+DEGs_res_all_preimpl_activeVsDead_merged$color_twocell_mor[DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.twocell <= -0.05 & DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.morulae <= -0.05 & (DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.twocell <= -0.1 | DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.morulae <= -0.1)] <- "twocell_mor_down"
+DEGs_res_all_preimpl_activeVsDead_merged$color_twocell_blasto <- "none"
+DEGs_res_all_preimpl_activeVsDead_merged$color_twocell_blasto[DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.twocell >= 0.05 & DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.blasto >= 0.05 & (DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.twocell >= 0.1 | DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.blasto >= 0.1)] <- "twocell_blasto_up"
+DEGs_res_all_preimpl_activeVsDead_merged$color_twocell_blasto[DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.twocell <= -0.05 & DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.blasto <= -0.05 & (DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.twocell <= -0.1 | DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.blasto <= -0.1)] <- "twocell_blasto_down"
+
+DEGs_res_all_preimpl_activeVsDead_merged$color_all <- "none"
+DEGs_res_all_preimpl_activeVsDead_merged$color_all[DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.twocell <= -0.05 & DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.morulae <= -0.05 & DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.blasto <= -0.05 & (DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.mor <= -0.1 | DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.blasto <= -0.1 | DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.twocell <= -0.1)] <- "all_down"
+DEGs_res_all_preimpl_activeVsDead_merged$color_all[DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.twocell >= 0.05 & DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.morulae >= 0.05 & DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.blasto >= 0.05 & (DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.mor >= 0.1 | DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.blasto >= 0.1 | DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.twocell >= 0.1)] <- "all_up"
+
+DEGs_res_all_preimpl_activeVsDead_merged$label_twocell_mor <- DEGs_res_all_preimpl_activeVsDead_merged$gene_name
+DEGs_res_all_preimpl_activeVsDead_merged$label_twocell_mor[DEGs_res_all_preimpl_activeVsDead_merged$color_twocell_mor == "none"] <- ""
+DEGs_res_all_preimpl_activeVsDead_merged$label_twocell_blasto <- DEGs_res_all_preimpl_activeVsDead_merged$gene_name
+DEGs_res_all_preimpl_activeVsDead_merged$label_twocell_blasto[DEGs_res_all_preimpl_activeVsDead_merged$color_twocell_blasto == "none"] <- ""
+DEGs_res_all_preimpl_activeVsDead_merged$label_all <- DEGs_res_all_preimpl_activeVsDead_merged$gene_name
+DEGs_res_all_preimpl_activeVsDead_merged$label_all[DEGs_res_all_preimpl_activeVsDead_merged$color_all == "none"] <- ""
+
+write.csv(DEGs_res_all_preimpl_activeVsDead_merged, file = "../../analysis/DEGs_across_preimpl/DEGs_res_all_preimpl_activeVsDead_merged_afterFilter.csv", quote = FALSE)
+
+```
+
+```{r DEGs scatter, include = TRUE}
+
+ggplot(data = DEGs_res_all_preimpl_activeVsDead_merged[log2FoldChange.twocell < 2.5], aes(x = log2FoldChange.twocell, y = log2FoldChange.morulae, label = label_twocell_mor)) +
+  geom_point(aes(color = color_twocell_mor), alpha = 0.7) +
+  geom_text_repel(size = 3, max.overlaps = 30) +
+  scale_colour_manual(values = c("twocell_mor_up" = "red", "twocell_mor_down" = "blue", "none" = "grey"))
+ggplot(data = DEGs_res_all_preimpl_activeVsDead_merged[log2FoldChange.twocell < 2.5], aes(x = log2FoldChange.twocell, y = log2FoldChange.blasto, label = label_twocell_blasto)) +
+  geom_point(aes(color = color_twocell_blasto), alpha = 0.7) +
+  geom_text_repel(size = 3, max.overlaps = 30) +
+  scale_colour_manual(values = c("twocell_blasto_up" = "red", "twocell_blasto_down" = "blue", "none" = "grey"))
+
+ggplot(data = DEGs_res_all_preimpl_activeVsDead_merged[log2FoldChange.twocell < 2.5], aes(x = log2FoldChange.twocell, y = log2FoldChange.morulae, label = label_twocell_mor)) +
+  geom_point(aes(color = color_twocell_mor), alpha = 0.7) +
+  geom_text_repel(size = 3, max.overlaps = 30) +
+  ggtitle("with axes limits") +
+  xlim(c(-0.5,0.5)) +
+  ylim(c(-0.5,0.5)) +
+  coord_fixed(ratio = 1) +
+  scale_colour_manual(values = c("twocell_mor_up" = "red", "twocell_mor_down" = "blue", "none" = "grey"))
+ggplot(data = DEGs_res_all_preimpl_activeVsDead_merged[log2FoldChange.twocell < 2.5], aes(x = log2FoldChange.twocell, y = log2FoldChange.blasto, label = label_twocell_blasto)) +
+  geom_point(aes(color = color_twocell_blasto), alpha = 0.7) +
+  geom_text_repel(size = 3, max.overlaps = 30) +
+  ggtitle("with axes limits") +
+  xlim(c(-0.5,0.5)) +
+  ylim(c(-0.5,0.5)) +
+  coord_fixed(ratio = 1) +
+  scale_colour_manual(values = c("twocell_blasto_up" = "red", "twocell_blasto_down" = "blue", "none" = "grey"))
+
+```
+
+## FIGURE
+
+Genes coherently changing in the two stages in the plot (i.e. l2FC>=0.05 or <=-0.05 in both stages and with at least abs(l2FC)>=0.1 in one of the two stages) are colored, genes coherently changing **in all three stages** (i.e. l2FC>=0.05 or <=-0.05 in all three stages and with at least abs(l2FC)>=0.1 in one of the three stages) are also labeled.
+
+```{r DEGs scatter w axis limits (FIGURE), include = TRUE}
+
+ggplot(data = DEGs_res_all_preimpl_activeVsDead_merged, aes(x = log2FoldChange.twocell, y = log2FoldChange.morulae, label = label_all)) +
+  geom_point(aes(color = color_twocell_mor), alpha = 0.7) +
+  geom_text_repel(size = 3, max.overlaps = 100) +
+  scale_colour_manual(values = c("twocell_mor_up" = "red", "twocell_mor_down" = "blue", "none" = "grey")) +
+  xlim(c(-0.5,0.5)) +
+  ylim(c(-0.5,0.5)) +
+  coord_fixed(ratio = 1) +
+  theme(legend.position = "none")
+ggplot(data = DEGs_res_all_preimpl_activeVsDead_merged, aes(x = log2FoldChange.twocell, y = log2FoldChange.blasto, label = label_all)) +
+  geom_point(aes(color = color_twocell_blasto), alpha = 0.7) +
+  geom_text_repel(size = 3, max.overlaps = 100) +
+  scale_colour_manual(values = c("twocell_blasto_up" = "red", "twocell_blasto_down" = "blue", "none" = "grey")) +
+  xlim(c(-0.5,0.5)) +
+  ylim(c(-0.5,0.5)) +
+  coord_fixed(ratio = 1) +
+  theme(legend.position = "none")
+
+```
+
+## Correlations - all merged DEGs
+
+```{r compute correlations, echo = TRUE}
+
+cor(DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.twocell, DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.morulae, method = "pearson")
+cor(DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.twocell, DEGs_res_all_preimpl_activeVsDead_merged$log2FoldChange.blasto, method = "pearson")
+
+```
+
+## Correlations - only coherently changing DEGs
+
+```{r compute correlations 2, echo = TRUE}
+
+coherent_DEGs_twocell_mor_dt <- DEGs_res_all_preimpl_activeVsDead_merged[DEGs_res_all_preimpl_activeVsDead_merged$color_twocell_mor != "none"]
+coherent_DEGs_twocell_blasto_dt <- DEGs_res_all_preimpl_activeVsDead_merged[DEGs_res_all_preimpl_activeVsDead_merged$color_twocell_blasto != "none"]
+
+cor(coherent_DEGs_twocell_mor_dt$log2FoldChange.twocell, coherent_DEGs_twocell_mor_dt$log2FoldChange.morulae, method = "pearson")
+cor(coherent_DEGs_twocell_blasto_dt$log2FoldChange.twocell, coherent_DEGs_twocell_blasto_dt$log2FoldChange.blasto, method = "pearson")
+
+```
+
+```{r sessioninfo, echo = TRUE, results = 'markup'}
+
+sessionInfo()
+
+```

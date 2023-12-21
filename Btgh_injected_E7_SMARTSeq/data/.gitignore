@@ -1,0 +1,5 @@
+*
+!README.md
+!.gitignore
+sequencing/*
+!sequencing/samples_table.csv

@@ -1,0 +1,248 @@
+---
+title: "Dynamics of expression of GOIs from Btgh experiment across development - preimpl DEGs and ribosomal protein genes"
+date: "November 8th, 2023"
+author: 
+- name: Sara Formichetti
+  affiliation: EMBL Rome
+  email: sara.formichetti@embl.it
+output: html_document
+---
+
+```{r Setting general options, include=FALSE}
+
+knitr::opts_chunk$set(autodep = TRUE, cache = TRUE, echo = FALSE, warning = FALSE, message = FALSE, self.contained = TRUE)
+
+```
+
+```{r loading needed packages}
+
+library("DESeq2")
+library("tximport")
+library(ggplot2)
+library(reshape2)
+library(data.table)
+
+```
+
+# SRA samples metadata
+
+```{r reading sample metadata}
+
+SRA_RunTable <- fread("../../data/sequencing/SraRunTable_selection.csv")
+
+# counting technical replicates based on Experiment ID
+SRA_RunTable[, c("tech_rep") := lapply(.SD, function(ds){seq(1, length(ds))}), .SDcols = "Consent", by = "Experiment"]
+# counting biological replicates
+SRA_RunTable[, c("biol_rep") := lapply(.SD, function(ds){seq(1, length(ds))}), .SDcols = "tech_rep", by = c("Developmental_Stage", "tech_rep")]
+# make sample name as combination of stage, tech rep and biological rep
+SRA_RunTable$sample <- paste0(gsub(" ", "_", SRA_RunTable$Developmental_Stage), ".", SRA_RunTable$biol_rep, ".", SRA_RunTable$tech_rep)
+# order stage
+SRA_RunTable$Developmental_Stage <- factor(SRA_RunTable$Developmental_Stage, levels = c("MII oocyte", "Zygote", "early 2-cell", "2-cell", "4-cell", "8-cell", "E3.5_ICM", "E3.5_TE", "E4.0_ICM", "Inner cell mass", "Embryonic stem cell", "E5.5_Epi", "E5.5_VE", "E6.5_Epi", "E6.5_VE", "E7.5_Ecto", "E7.5_PS", "E7.5_Meso", "E7.5_Endo"))
+setorder(SRA_RunTable, Developmental_Stage, biol_rep, tech_rep)
+rownames(SRA_RunTable) <- SRA_RunTable$sample # necessary to in case make dds
+
+```
+
+```{r design table, results='asis'}
+
+knitr::kable(SRA_RunTable, row.names = FALSE)
+
+```
+
+```{r creating tx2gene and geneID2name df}
+
+# Creating the transcriptID2geneID df; the transcriptID2geneID tsv file has been created with custom shell script tx2gene_from_encode_gtf.sh in src/sh folder
+tx2gene <- fread("../../data/annotations/gencode.vM25.annotation.tx2gene.tsv", col.names = c("tx_id", "gene_id"))
+# removing version
+tx2gene <- tx2gene[,  lapply(.SD, gsub, pattern = "\\..*", replacement = ""), .SDcols = names(tx2gene)]
+
+# Creating the geneID2geneName df; the geneID2geneName tsv file has been created with custom shell script geneID2name_from_encode_gtf.sh in src/sh folder
+geneID2name <- fread("../../data/annotations/gencode.vM25.annotation.geneID2name.tsv", col.names = c("gene_id", "gene_name"))
+# removing version
+geneID2name <- geneID2name[,  lapply(.SD, gsub, pattern = "\\..*", replacement = ""), .SDcols = names(geneID2name)]
+
+# Merging the 2 dfs
+gene_map_dt <- as.data.table(merge(geneID2name, tx2gene, by = "gene_id"))
+
+```
+
+```{r creating the txi object}
+
+# specifying the directory containing Salmon outputs
+dir <- "../../data/sequencing/Salmon"
+
+files <- sort(list.files(path = dir))
+
+# making the  character vector of names of Salmon quantification's files
+files_w_path <- file.path(dir, files)
+
+# tximport gene level summarization of transcripts' quantification
+txi <- tximport(files_w_path, type="salmon", tx2gene=tx2gene, ignoreTxVersion = TRUE)
+
+# renaming columns of txi matrices object
+colnames(txi$counts) <- gsub("_.*", "", files)
+colnames(txi$abundance) <- gsub("_.*", "", files)
+colnames(txi$length) <- gsub("_.*", "", files)
+
+# ordering txi matrices as the samples in the SRA table
+txi$counts <- txi$counts[, SRA_RunTable$Run]
+txi$abundance <- txi$abundance[, SRA_RunTable$Run]
+txi$length <- txi$length[, SRA_RunTable$Run]
+
+```
+
+```{r working on TPM matrix}
+
+# TPM values are in the abundance matrix
+TPM_dt <- data.table(txi$abundance)
+# reading gene ids
+TPM_dt$gene_id <- rownames(txi$abundance)
+# adding gene names
+TPM_dt <- merge(TPM_dt, geneID2name, by = "gene_id")
+# giving sample names as column names
+names(TPM_dt)[-c(1, ncol(TPM_dt))] <- SRA_RunTable$sample
+
+```
+
+```{r removing bad samples}
+
+TPM_dt$`early_2-cell.2.1` <- NULL
+SRA_RunTable <- SRA_RunTable[SRA_RunTable$sample != "early_2-cell.2.1"]
+
+```
+
+# Coherently changing DEGs
+
+```{r TPM lineplot function preimplantation}
+
+library(ggpubr)
+
+gene_lineplot_preimpl <- function (gene_symbols, my_title, show_legend) {
+  gene_TPM <- TPM_dt[gene_name %in% gene_symbols]
+  TPM_to_plot <- melt(gene_TPM, id.vars = c("gene_name", "gene_id"), variable.name = "sample", value.name = "TPM")
+  # creating stage_biolRep variable from sample name
+  TPM_to_plot$stage_rep <- gsub("\\.[1-9]$", "", TPM_to_plot$sample)
+  # creating stage variable from sample name
+  TPM_to_plot$stage <- gsub("\\.[1-9]$", "", TPM_to_plot$stage_rep)
+  # reordering the stage for plotting
+  TPM_to_plot$stage <- factor(TPM_to_plot$stage, levels = c("MII_oocyte", "Zygote", "early_2-cell", "2-cell", "4-cell", "8-cell", "E3.5_ICM", "Inner_cell_mass", "E4.0_ICM", "Embryonic_stem_cell", "E5.5_Epi", "E6.5_Epi", "E7.5_Ecto", "E7.5_PS", "E7.5_Meso", "E7.5_Endo", "E3.5_TE", "E5.5_VE", "E6.5_VE"))
+  # averaging TPM for tech reps
+  TPM_to_plot <- TPM_to_plot[, lapply(.SD, mean), .SDcols = "TPM", by = c("stage_rep", "gene_name", "stage")]
+  # averaging TPM for biol reps
+  TPM_to_plot[, c("TPM_mean") := list(mean(TPM)), by = c("stage", "gene_name")]
+  # for each gene, for the E3.5 stage taking the expr in ICM or TE depending on whether they are more highly expressed in ICM or TE
+  # getting expr in ICM and TE for each gene
+  blasto_TPM <- unique(TPM_to_plot[stage %in% c("E3.5_ICM", "E3.5_TE"), .(TPM_mean, gene_name, stage)])
+  blasto_TPM_large <- dcast(blasto_TPM, gene_name ~ stage, value.var = "TPM_mean")
+  blasto_TPM_large$diff <- blasto_TPM_large$E3.5_ICM - blasto_TPM_large$E3.5_TE
+  blasto_TPM_large$blasto_tissue <- ifelse(blasto_TPM_large$diff > 0, "ICM", "TE")
+  # defining E3.5 expr as the expr in the E3.5 ICM or TE depending on which tissue shows higher expr
+  blasto_TPM_large$E3.5_blasto <- blasto_TPM_large$E3.5_ICM
+  blasto_TPM_large$E3.5_blasto[blasto_TPM_large$blasto_tissue == "TE"] <- blasto_TPM_large$E3.5_TE[blasto_TPM_large$blasto_tissue == "TE"]
+  # returning to large dt for merging with blasto expr table
+  TPM_to_plot_large <- dcast(unique(TPM_to_plot[, .(gene_name, stage, TPM_mean)]), gene_name ~ stage, value.var = "TPM_mean")
+  TPM_to_plot_large <- merge(TPM_to_plot_large, blasto_TPM_large[, .(gene_name, blasto_tissue, E3.5_blasto)], by = "gene_name")
+  # now remelting for plotting
+  TPM_to_plot_2 <- melt(TPM_to_plot_large, id.vars = "gene_name", variable.name = "stage", value.name = "TPM_mean")
+  TPM_to_plot_preimpl <- TPM_to_plot_2[TPM_to_plot_2$stage %in% c("Zygote", "2-cell", "4-cell", "8-cell", "E3.5_blasto")]
+  TPM_to_plot_preimpl$TPM_mean <- as.numeric(TPM_to_plot_preimpl$TPM_mean)
+  TPM_to_plot_preimpl$summary <- rep("none", length(TPM_to_plot_preimpl$gene_name))
+  ggplot(data = TPM_to_plot_preimpl, aes(x = stage, y = TPM_mean)) +
+        geom_point() +
+        geom_line(aes(color = gene_name, group = gene_name), show.legend = show_legend) +
+        stat_summary(aes(group = summary), geom = "line", fun = mean, colour = "black") +
+        stat_summary(aes(group = summary), geom="ribbon", fun.data=mean_cl_boot, fun.args=(conf.int=0.95), alpha = 0.2, linetype="dashed", colour="grey") +
+        ylab("TPM (log2 scale)") +
+        xlab("") +
+        scale_y_continuous(trans = "log2", limits = c(10,3000), breaks = c(10,100,1000,3000), labels = c(10,100,1000,3000)) +
+        ggtitle(my_title) +
+        scale_fill_brewer(palette = "Set2") +
+        theme(axis.text = element_text(size = 12), axis.title = element_text(size = 12),
+          title = element_text(size = 12),
+          legend.text = element_text(size = 10), legend.title = element_text(size = 10),
+          legend.key.height = unit(1.5,"line"),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.background = element_blank(),
+          axis.line = element_line(colour = "black"),
+          axis.text.x = element_text(angle = 45, hjust = 1))
+}
+
+```
+
+```{r load DEGs}
+
+DEGs_table <- fread("../../data/Btgh_proj/DEGs_res_all_preimpl_activeVsDead_merged_afterFilter.csv")
+coherently_up <- DEGs_table[color_all == "all_up"]$gene_name
+coherently_down <- DEGs_table[color_all == "all_down"]$gene_name
+
+```
+
+```{r DEGs lineplots (FIGURE), include = TRUE}
+
+my_gene_symbols <- coherently_up[!(coherently_up %in% c("Gm5612", "Eif4a3l1"))] #excluding pseudo-/predicted genes
+gene_lineplot_preimpl(gene_symbols = my_gene_symbols, my_title = "coherently up", show_legend = TRUE)
+my_gene_symbols <- coherently_down
+gene_lineplot_preimpl(gene_symbols = my_gene_symbols, my_title = "coherently down", show_legend = TRUE)
+
+```
+
+# Ribosomal protein genes
+
+```{r TPMs of ribo proteins}
+
+# reading names of mouse ribosomal proteins
+ribo_proteins_dt <- fread("../../../Btgh_injected_2cell_SMARTSeq/doc/ribo_proteins_mmus_RPG.csv")
+# selecting ribo proteins from TPM dt
+ribo_TPM_dt <- TPM_dt[gene_name %in% ribo_proteins_dt$gene_name]
+ribo_TPM_dt_m <- melt(ribo_TPM_dt, id.vars = c("gene_name", "gene_id"), variable.name = "sample", value.name = "TPM")
+# creating stage_biolRep variable from sample name
+ribo_TPM_dt_m$stage_rep <- gsub("\\.[1-9]$", "", ribo_TPM_dt_m$sample)
+# creating stage variable from sample name
+ribo_TPM_dt_m$stage <- gsub("\\.[1-9]$", "", ribo_TPM_dt_m$stage_rep)
+# reordering the stage for plotting
+ribo_TPM_dt_m$stage <- factor(ribo_TPM_dt_m$stage, levels = c("MII_oocyte", "Zygote", "early_2-cell", "2-cell", "4-cell", "8-cell", "E3.5_ICM", "Inner_cell_mass", "E4.0_ICM", "Embryonic_stem_cell", "E5.5_Epi", "E6.5_Epi", "E7.5_Ecto", "E7.5_PS", "E7.5_Meso", "E7.5_Endo", "E3.5_TE", "E5.5_VE", "E6.5_VE"))
+# averaging TPM for tech reps
+ribo_TPM_dt_m <- ribo_TPM_dt_m[, lapply(.SD, mean), .SDcols = "TPM", by = c("stage_rep", "gene_name", "stage")]
+# averaging TPM for biol reps
+ribo_TPM_dt_m[, c("TPM_mean") := list(mean(TPM)), by = c("stage", "gene_name")]
+
+ribo_TPM_dt_large <- dcast(unique(ribo_TPM_dt_m[, .(stage, TPM_mean, gene_name)]), gene_name ~ stage, value.var = "TPM_mean")
+
+# for the E3.5 stage, taking either ICM or TE expr depending on where gene expr is higher
+ribo_TPM_dt_large$E3.5_diff <- ribo_TPM_dt_large$E3.5_ICM - ribo_TPM_dt_large$E3.5_TE
+ribo_TPM_dt_large$blasto_tissue <- ifelse(ribo_TPM_dt_large$E3.5_diff > 0, "ICM", "TE")
+# defining E3.5 expr as the expr in the E3.5 ICM or TE depending on which tissue shows higher expr
+ribo_TPM_dt_large$E3.5_blasto <- ribo_TPM_dt_large$E3.5_ICM
+ribo_TPM_dt_large$E3.5_blasto[ribo_TPM_dt_large$blasto_tissue == "TE"] <- ribo_TPM_dt_large$E3.5_TE[ribo_TPM_dt_large$blasto_tissue == "TE"]
+
+```
+
+```{r heatmap ribo proteins (FIGURE)}
+
+# annotating DE ribo proteins
+ribo_TPM_dt_large$is_DEG <- ifelse(ribo_TPM_dt_large$gene_name %in% DEGs_table$gene_name, "DE", "non DE")
+# reordering dt based on DE or not
+ribo_TPM_dt_large <- setorder(ribo_TPM_dt_large, is_DEG)
+
+# Creating matrix needed for pheatmap function
+ribo_mx <- as.matrix(ribo_TPM_dt_large[, c("Zygote", "2-cell", "4-cell", "8-cell", "E3.5_blasto", "E5.5_Epi", "E6.5_Epi")])
+row.names(ribo_mx) <- ribo_TPM_dt_large$gene_name
+
+library(pheatmap)
+
+# defining some distance functions for clustering in pheatmap
+distfun=function(m) as.dist(1 - (cor(t(log(m+1)),method="spearman")))
+distfun_col <- function(m) as.dist(1 - (cor(log(m+1), method="spearman")))
+
+ribo_annotation <- as.data.frame(ribo_TPM_dt_large[, .(is_DEG)])
+row.names(ribo_annotation) <- ribo_TPM_dt_large$gene_name
+pheatmap(log10(ribo_mx+1), cluster_rows = TRUE, cluster_cols = TRUE, show_rownames = TRUE, show_colnames = TRUE, clustering_distance_rows = distfun(ribo_mx), clustering_distance_cols = distfun_col(ribo_mx), fontsize = 6, scale = "none", annotation_row = ribo_annotation)
+
+```
+
+```{r sessioninfo, echo = TRUE, results = 'markup'}
+
+sessionInfo()
+
+```

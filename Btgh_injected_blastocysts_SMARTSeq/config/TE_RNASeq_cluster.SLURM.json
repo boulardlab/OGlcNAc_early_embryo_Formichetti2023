@@ -1,0 +1,25 @@
+{
+  "__default__": {
+    "nCPUs": "{threads}",
+    "memory": 10000,
+    "maxTime": "5:00:00",
+    "name": "{rule}.{wildcards}",
+    "rulename": "{rule}",
+    "output": "cluster_logs/{rule}_%j.out",
+    "error" : "cluster_logs/{rule}_%j.err",
+    "group": "boulard"
+  },
+  "STAR_align": {
+    "memory": 40000,
+    "maxTime": "10:00:00"
+  },
+  "sort_annotation": {
+    "memory": 20000
+  },
+  "filter_paired_bam": {
+    "memory": 20000
+  },
+  "bamToBigWig": {
+    "memory": 20000
+  }
+}

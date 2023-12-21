@@ -1,0 +1,41 @@
+{
+  "__default__": {
+    "nCPUs": "{threads}",
+    "memory": 10000,
+    "maxTime": "5:00:00",
+    "name": "{rule}.{wildcards}",
+    "rulename": "{rule}",
+    "output": "cluster_logs/{rule}_%j.out",
+    "error" : "cluster_logs/{rule}_%j.err",
+    "group": "boulard"
+  },
+  "mask_genome": {
+    "memory": 40000
+  },
+  "STAR_genome_preparation": {
+    "memory": 40000,
+    "cpus-per-task": 16
+  },
+  "STAR_align": {
+    "memory": 40000,
+    "maxTime": "10:00:00"
+  },
+  "nsort_maj_chr_bam": {
+    "memory": 20000
+  },
+  "SNPsplit_bam": {
+    "memory": 40000
+  },
+  "flagged_bam_to_bw": {
+    "memory": 20000
+  },
+  "unassigned_bam_to_bw": {
+    "memory": 20000
+  },
+  "g1_bam_to_bw": {
+    "memory": 20000
+  },
+  "g2_bam_to_bw": {
+    "memory": 20000
+  }
+}
