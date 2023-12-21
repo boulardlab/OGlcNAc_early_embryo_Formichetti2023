@@ -214,7 +214,7 @@ ggplot(data = DEGs_res_all_preimpl_activeVsDead_merged, aes(x = log2FoldChange.t
 
 ```
 
-## Correlations - all merged DEGs
+## Correlations - all DEGs
 
 ```{r compute correlations, echo = TRUE}
 

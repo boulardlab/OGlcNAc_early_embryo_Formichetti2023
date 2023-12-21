@@ -1,5 +1,8 @@
 !.gitignore
 
+# ignore README html
+README.html
+
 # Ignore tmp dir
 ######################
 tmp/

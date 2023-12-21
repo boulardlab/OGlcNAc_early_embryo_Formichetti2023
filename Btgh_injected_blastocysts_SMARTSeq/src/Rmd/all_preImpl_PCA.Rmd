@@ -181,7 +181,7 @@ do.call(grid.arrange, lapply(1:2, PC_loadings_cumvar_DEGs, my_dds = dds, mean_th
 
 ```
 
---> I store the 50 and 30 genes mostly associated with PC1 and PC2 (i.e. with highest **contribution**), respectively, together with their **coordinates** on PC1 and PC2. 
+--> I store the 50 and 30 genes mostly associated with PC1 and PC2 (i.e. with highest **contribution**), respectively, together with their **coordinates** on PC1 and PC2. Their expression dynamics across mouse preimplantation stages will be plotted using [publicly available mRNA-Seq data spanning mouse early development](https://boulardlab.github.io/OGlcNAc_early_embryo_Formichetti2023/reports/embryo_public_data_GSE66582_GSE76505_reanalysis/Btgh_PCA_genes_dynamics.html).
 
 ```{r PC loadings DEGs PCA}
 

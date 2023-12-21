@@ -65,7 +65,7 @@ MA_plot <- function(dds_res, adjpval, ylims) {
 
 ```
 
-```{r functions to get and order DESeq results, echo = TRUE}
+```{r functions to get and order DESeq results}
 
 get_results_all_comp <- function (my_dds) {
   res_list <- list(
