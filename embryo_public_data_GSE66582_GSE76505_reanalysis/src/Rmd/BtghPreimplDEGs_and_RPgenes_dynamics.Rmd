@@ -218,7 +218,7 @@ ribo_TPM_dt_large$E3.5_blasto[ribo_TPM_dt_large$blasto_tissue == "TE"] <- ribo_T
 
 ```
 
-```{r heatmap ribo proteins (FIGURE)}
+```{r heatmap ribo proteins (FIGURE), fig.height=8}
 
 # annotating DE ribo proteins
 ribo_TPM_dt_large$is_DEG <- ifelse(ribo_TPM_dt_large$gene_name %in% DEGs_table$gene_name, "DE", "non DE")
