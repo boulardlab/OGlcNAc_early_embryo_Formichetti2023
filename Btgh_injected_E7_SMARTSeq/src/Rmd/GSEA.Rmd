@@ -155,7 +155,7 @@ gsea_res_custom_dt <- as.data.table(fortify(all_gsea_activeVsDead_EPI[[1]], show
 gsea_res_custom_dt$abs_NES <- abs(gsea_res_custom_dt$NES)
 setorder(gsea_res_custom_dt, -abs_NES)
 
-ggplot(gsea_res_custom_dt[1:17], aes(x = GeneRatio, y = reorder_within(Description, GeneRatio, .sign), color = `p.adjust`)) +
+ggplot(gsea_res_custom_dt[1:20], aes(x = GeneRatio, y = reorder_within(Description, GeneRatio, .sign), color = `p.adjust`)) +
       scale_color_continuous(low="red", high="blue", name = "p.adjust", guide = guide_colorbar(reverse=TRUE)) +
       geom_point(aes(size=setSize)) +
       scale_size(range=c(0.5, 5)) +
