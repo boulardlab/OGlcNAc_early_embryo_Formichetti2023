@@ -19,7 +19,7 @@ For each of the 4 embryonic stages, the general workflow is the same:
 
     - for single copy genes: a Galaxy pipeline, found in **src/galaxy** of each subrepository
     - for retrotrasposons: a custom snakemake pipeline, found in **snake-make/TE_RNASeq.Snakefile** of each subrepository
-    - for the allelic-specific RNA-Seq analysis of blastocysts: a custom snakemake pipeline, found in **snake-make/SNPsplit.Snakefile**
+    - for the allele-specific RNA-Seq analysis of blastocysts: a custom snakemake pipeline, found in **snake-make/SNPsplit.Snakefile**
     - for the snakemake pipelines, config files are in config/ and conda environments are in env/conda
 
 <n>
