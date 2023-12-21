@@ -358,7 +358,7 @@ So, even if the active vs dead comparison is not significant under threshold pva
 
 From the analysis of published dataset GSE66582 [(Wu et al., 2016)](https://www.nature.com/articles/nature18606), spanning preimplantation stages from the oocyte to the blastocyst, in OGlcNAc_early_embryo_Formichetti2023/embryo_public_data_GSE66582_GSE76505_reanalysis/src/Rmd/DE_analysis.Rmd I created a list of genes which are >2x up-regulated from the late 2-cell to the 4-cell stage. 
 
-```{r plot expr 4c genes, include = TRUE}
+```{r plot expr 4c genes (FIGURE), include = TRUE}
 
 # reading 4c-specific genes
 up_2to4c <- fread("../../../embryo_public_data_GSE66582_GSE76505_reanalysis/analysis/DE/up_2to4c.csv")
@@ -415,7 +415,7 @@ There is a slightly lower expression in Btgh-injected embryos. I test the differ
 
 # RPG vs 2- to 4-cell upregulated genes 
 
-```{r 4c genes - rp genes correlation, include = TRUE}
+```{r 4c genes - rp genes correlation (FIGURE), include = TRUE}
 
 ribo_4c_dt <- merge(ribo_sample_avg, up_2to4c_sample_avg, by = c("sample", "condition", "batch"), suffixes = c(".rp", ".4cUP"))
 
