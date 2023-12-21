@@ -3,7 +3,6 @@
 !.gitignore
 !sashimi/
 sashimi/*
-sashimi/pdf/*
-!sashimi/pdf/Og*
+!sashimi/pdf/
 !sashimi/bam_list.tsv
 
