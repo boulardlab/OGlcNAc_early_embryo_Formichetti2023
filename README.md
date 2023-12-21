@@ -48,7 +48,7 @@ For **2-cell embryos**, the repository also contains the analysis of Smart-Seq d
 
 1. a Galaxy pipeline starting from fastq files and producing the bigwig files. It uses more sensitive STAR mapping parameters than the one used for analysis of expression and can be found in **src/galaxy/Galaxy-Workflow-PE_SMART-Seq_embryo_mapToGenome_SJaccuracy.ga**  
 
-2. to produce sashimi plots, [ggsashimi](https://github.com/guigolab/ggsashimi) (called in src/sh/ggsashimi.sh).
+2. to produce sashimi plots for *[Ogt](https://github.com/boulardlab/OGlcNAc_early_embryo_Formichetti2023/blob/main/embryo_public_data_GSE66582_GSE76505_reanalysis/analysis/sashimi/pdf/Ogt_bam_list.pdf)* and *[Oga](https://github.com/boulardlab/OGlcNAc_early_embryo_Formichetti2023/blob/main/embryo_public_data_GSE66582_GSE76505_reanalysis/analysis/sashimi/pdf/Oga_bam_list.pdf)*, [ggsashimi](https://github.com/guigolab/ggsashimi) (called in src/sh/ggsashimi.sh).
 
 # Raw data
 
