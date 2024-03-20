@@ -23,7 +23,6 @@ snakemake \
   --use-conda \
   $generalOptions\
   $debuggingOptions\
-  --use-singularity --singularity-args "--bind /g/boulard/Projects/Btgh_injected_2cells_first_SMARTSeq/" \
   -j 96 \
   --cluster-config config/TE_RNASeq_cluster.SLURM.json \
   --cluster "sbatch -p {cluster.queue} -J {cluster.name} --cpus-per-task {cluster.nCPUs} --mem {cluster.memory} \
