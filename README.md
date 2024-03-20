@@ -2,7 +2,7 @@
 
 # Introduction
 
-* This repository contains all code used to generate the figures and conclusions based on RNA-Seq data contained in paper "Perturbing nuclear glycosylation in the mouse preimplantation embryo slows down embryonic growth" ([Formichetti et al. 2023](https://www.biorxiv.org/content/10.1101/2024.01.22.576677v1)).
+* This repository contains all code used to generate the figures and conclusions based on RNA-Seq data contained in paper "Perturbing nuclear glycosylation in the mouse preimplantation embryo slows down embryonic growth" ([Formichetti et al. 2024](https://www.biorxiv.org/content/10.1101/2024.01.22.576677v1)).
 
 * For each sequencing dataset, there is a subrepository with a self-explanatory name: 
 
