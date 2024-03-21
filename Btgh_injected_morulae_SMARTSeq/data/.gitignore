@@ -1,5 +1,6 @@
 *
 !README.md
 !.gitignore
+!sequencing/
 sequencing/*
 !sequencing/samples_table.csv

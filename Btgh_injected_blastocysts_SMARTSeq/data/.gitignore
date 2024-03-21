@@ -1,9 +1,6 @@
 *
 !README.md
 !.gitignore
+!sequencing/
 sequencing/*
 !sequencing/samples_table.csv
-annotations/*
-!annotations/GenomeMUSter_FVB_PWD
-annotations/GenomeMUSter_FVB_PWD/*
-!annotations/GenomeMUSter_FVB_PWD/FVB_PWD_SNP_all_chr_w_header.tsv

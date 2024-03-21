@@ -1,6 +1,7 @@
 *
 !README.md
 !.gitignore
+!sequencing/
 sequencing/*
 !sequencing/samples_table*
 !sequencing/SraRunTable*
