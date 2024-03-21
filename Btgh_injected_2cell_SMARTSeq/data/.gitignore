@@ -4,6 +4,6 @@
 !sequencing/
 sequencing/*
 !sequencing/samples_table.csv
-!sequencing/Conine
+!sequencing/Conine/
 sequencing/Conine/*
 !sequencing/Conine/SRR_Acc_List_cauda_2C_GSE111864.txt
