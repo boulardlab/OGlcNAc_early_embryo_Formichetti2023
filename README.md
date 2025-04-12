@@ -1,4 +1,4 @@
-# Formichetti et al., 2024 - Perturbing nuclear glycosylation in the mouse preimplantation embryo slows down embryonic growth
+# Formichetti et al., 2025 - Perturbing nuclear glycosylation in the mouse preimplantation embryo slows down embryonic growth
 
 # Introduction
 
